@@ -102,6 +102,12 @@ test('model test sends GET only and empty keys never send a request',async t=>{
   await configure(page);await page.getByRole('button',{name:'测试连接 / 获取模型',exact:true}).click();await page.waitForFunction(()=>document.getElementById('course-assistant-root').shadowRoot.getElementById('notice').textContent.includes('连接成功'));
   assert.deepEqual(await page.evaluate(()=>window.__requests.map(r=>({url:r.url,data:r.data}))),[{url:'https://api.deepseek.com/models',data:undefined}]);
 });
+test('stored keys never get repopulated into the page and can be explicitly cleared',async t=>{
+  const page=await pageFor(t);await configure(page);assert.equal(await page.getByLabel('DeepSeek API Key',{exact:true}).inputValue(),'');
+  await page.reload();await page.addScriptTag({content:source});await tab(page,'设置');assert.equal(await page.getByLabel('DeepSeek API Key',{exact:true}).inputValue(),'');
+  assert.match(await page.getByLabel('DeepSeek API Key',{exact:true}).getAttribute('placeholder'),/已保存/);
+  await page.getByRole('button',{name:'清除已保存密钥',exact:true}).click();await page.getByRole('button',{name:'测试连接 / 获取模型',exact:true}).click();assert.equal(await page.evaluate(()=>window.__requests.length),0);
+});
 test('refresh presets, cross-panel persistence, navigation pause and reload limit',async t=>{
   const page=await pageFor(t);await tab(page,'刷新');await page.getByRole('button',{name:'30 秒',exact:true}).click();assert.equal(await page.getByLabel('刷新间隔（秒）').inputValue(),'30');
   await page.getByRole('button',{name:'开始刷新',exact:true}).click();await tab(page,'AI');await tab(page,'刷新');assert.equal(await page.getByRole('button',{name:'开始刷新',exact:true}).isDisabled(),true);

@@ -271,13 +271,17 @@ async function sendChat(){
 
 main.append(panel('settings',[
   title('设置','密钥只保存在脚本管理器中，仅发送给 DeepSeek 官方 API。'),
-  field('DeepSeek API Key',element('input',{id:'api-key',type:'password',autocomplete:'off',value:settings.apiKey,placeholder:'填写自己的 API Key'})),
+  field('DeepSeek API Key',element('input',{id:'api-key',type:'password',autocomplete:'off',placeholder:settings.apiKey?'已保存；留空保留原密钥':'填写自己的 API Key'})),
   field('模型名称',element('input',{id:'model',list:'model-list',value:settings.model})),
   element('datalist',{id:'model-list'},['deepseek-flash','deepseek-v4-pro'].map(model=>element('option',{value:model}))),
   element('label',{class:'check'},[element('input',{id:'thinking',type:'checkbox',checked:settings.thinking}),'开启深度思考']),
   field('API 超时（秒）',element('input',{id:'timeout',type:'number',min:15,max:600,value:settings.timeout})),
   element('label',{class:'check'},[element('input',{id:'unlock',type:'checkbox',checked:settings.unlock}),'允许页面文字选中、复制和粘贴']),
   row(button('保存设置',saveSettings,{class:'primary'}),button('测试连接 / 获取模型',testModels,{id:'test-models'})),
+  button('清除已保存密钥',()=>{
+    if(busyChat||busyAnswer||busyModels)throw Error('请先停止当前 API 请求。');
+    settings.apiKey='';write('settings',settings);$('api-key').value='';updateKeyStatus();notice('已清除保存的密钥。');
+  },{class:'link'}),
   element('div',{class:'note',text:'测试连接仅请求模型列表，不发起聊天生成。AI 对话与题目分析按你的 DeepSeek 账户计费。'}),
   hint('切换新版前请停用旧版脚本。新版使用独立存储，需要重新填写密钥；不会读取旧版设置。'),
   element('a',{href:'https://platform.deepseek.com/api_keys',target:'_blank',rel:'noopener noreferrer',class:'link',text:'打开 DeepSeek 密钥管理'})
@@ -287,10 +291,13 @@ function saveSettings(){
   if(!Number.isInteger(timeout)||timeout<15||timeout>600)throw Error('超时必须为 15～600 秒的整数。');
   if(!/^[\w.-]{1,100}$/.test(model))throw Error('请输入有效的模型名称。');
   if(busyChat||busyAnswer||busyModels)throw Error('请先停止当前 API 请求再修改设置。');
-  settings=Core.config({...settings,apiKey:$('api-key').value,model,timeout,thinking:$('thinking').checked,unlock:$('unlock').checked});
-  write('settings',settings);copiedDocuments.set(settings.unlock);updateKeyStatus();notice('设置已保存。');
+  settings=Core.config({...settings,apiKey:$('api-key').value.trim()||settings.apiKey,model,timeout,thinking:$('thinking').checked,unlock:$('unlock').checked});
+  write('settings',settings);$('api-key').value='';copiedDocuments.set(settings.unlock);updateKeyStatus();notice('设置已保存。');
 }
-function updateKeyStatus(){$('key-status').textContent=settings.apiKey?'DeepSeek 密钥已配置':'DeepSeek 密钥尚未配置';}
+function updateKeyStatus(){
+  $('key-status').textContent=settings.apiKey?'DeepSeek 密钥已配置':'DeepSeek 密钥尚未配置';
+  $('api-key').placeholder=settings.apiKey?'已保存；留空保留原密钥':'填写自己的 API Key';
+}
 async function testModels(){
   if(busyModels)return;saveSettings();const controller=new AbortController();busyModels=controller;$('test-models').disabled=true;
   try{
