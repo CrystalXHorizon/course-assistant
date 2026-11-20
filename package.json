@@ -1,0 +1,16 @@
+{
+  "name": "course-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "独立实现的课程页面辅助用户脚本",
+  "license": "MIT",
+  "author": "CrystalXHorizon",
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "test": "node --test tests/core.test.cjs",
+    "test:browser": "node --test tests/browser.test.cjs",
+    "check": "npm run build && node --check course-assistant.user.js && npm test && npm run test:browser"
+  },
+  "devDependencies": { "playwright": "1.65.1" },
+  "engines": { "node": ">=20" }
+}
