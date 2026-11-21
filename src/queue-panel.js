@@ -240,14 +240,22 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     viewedURL = location.href;
     attempted = new WeakMap();
     entryTime = Date.now();
+    catalogRequested = false;
+    activeChapter = null;
+    switched = null;
+    lastSwitch = 0;
+    confirmedCompleteAt = 0;
     if (Queue.identify(location.href) === Queue.currentCourse(queue)?.id) return;
     const url = Queue.courseLink(target, location.href, platform);
     if (!url) { stop('课程入口无法识别，请打开课程后继续。'); return; }
+    navigateToCourse(url);
+  }
+  function navigateToCourse(url) {
     const ticket = newToken();
     Object.assign(queue, { ticket, handoff: Queue.identify(url.href), lease: Date.now() + Queue.HOLD_MS });
     save();
-    departure = true;
     location.assign(Queue.handoffURL(url.href, ticket).href);
+    departure = true;
   }
   function finish(status, reason) {
     sync();
@@ -308,20 +316,22 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
       if (!isOwner()) { player.pause(); return; }
     }
     const playing = players.some(player => !player.paused && !player.ended);
-    if (!playing && (!chapter || chapter.status === 'done') && now - lastSwitch > 2500) {
-      const next = chapters.find(chapter => chapter.status === 'pending' && !chapter.active);
+    if ((!playing || chapter?.status === 'done') && (!chapter || chapter.status === 'done') && now - lastSwitch > 2500) {
+      const next = chapters.find(chapter => chapter.status === 'pending' && !chapter.active)
+        || (!chapter && platform === 'chaoxing' && chapters.find(row => row.status === 'unknown' && /\btoOld\(/.test(row.control.getAttribute('onclick') || '')));
       if (next && switched !== next.control) {
         switched = next.control;
         lastSwitch = now;
-        const link = Queue.courseLink(next.control.getAttribute('href'), next.control.ownerDocument.baseURI, platform);
-        if (link && Queue.identify(link.href) === item.id && link.origin !== location.origin) {
-          const ticket = newToken();
-          Object.assign(queue, { ticket, handoff: item.id, lease: now + Queue.HOLD_MS });
-          save();
-          departure = true;
-          location.assign(Queue.handoffURL(link.href, ticket).href);
-        } else if (next.control.matches('a[target="_blank"]') && link && Queue.identify(link.href) === item.id) {
-          location.assign(link.href);
+        for (const player of players) player.pause();
+        const href = next.control.getAttribute('href');
+        const direct = href && Queue.courseLink(href, next.control.ownerDocument.baseURI, platform);
+        const link = direct || (platform === 'chaoxing' && Queue.chaoxingChapterEntry(next.control, location.href, item.id));
+        const changesPage = link && (link.origin !== location.origin || link.pathname !== location.pathname || link.search !== location.search);
+        if (changesPage && Queue.identify(link.href) === item.id) {
+          navigateToCourse(link);
+        } else if (/\btoOld\(/.test(next.control.getAttribute('onclick') || '')) {
+          stop('已找到待学章节，但学习通未提供可用的学习入口。请手动打开这一章后点击继续。');
+          return;
         } else {
           next.control.click();
         }

@@ -209,6 +209,51 @@ test('queue keeps control when the course opens on another platform subdomain',a
   await page.waitForFunction(()=>window.__plays>0);
   assert.equal(await page.getByRole('button',{name:'暂停队列',exact:true}).isEnabled(),true);
 });
+
+test('Chaoxing course home opens its first unfinished chapter through the platform transfer', async t => {
+  const home = 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=22&clazzid=91&cpi=10';
+  const page = await pageFor(t, {
+    url: home, sharedStore: true,
+    fixture: url => {
+      if (url.pathname.endsWith('/stu')) return `<!doctype html><title>高等数学</title>
+        <a href="${home}">高等数学</a><button data-url="/mooc2-ans/mycourse/studentcourse" onclick="document.querySelector('iframe').removeAttribute('hidden')">章节</button>
+        <iframe hidden src="/mooc2-ans/mycourse/studentcourse?courseid=22&clazzid=91&cpi=10"></iframe>`;
+      if (url.pathname.endsWith('/studentcourse')) return `<!doctype html><script>var enc = 'fixture_value'; var cpi = 10;</script>
+        <div class="chapter_item" onclick="toOld(22, 101)"><b class="icon_yiwanc">已完成</b>第一章</div>
+        <div class="chapter_item"><a href="javascript:;" onclick="toOld(courseId, '102', 91)">第 2 章</a><input class="knowledgeJobCount" type="hidden" value="3"></div>`;
+      if (url.pathname === '/mycourse/transfer') return `<!doctype html><script>location.replace(new URLSearchParams(location.search).get('refer') + location.hash);</script>`;
+      return queueFixture(url);
+    }
+  });
+  await readCatalog(page);
+  await page.getByRole('button', { name: /高等数学/ }).click();
+  const transfer = page.waitForRequest(req => new URL(req.url()).pathname === '/mycourse/transfer');
+  await page.getByRole('button', { name: '开始学习', exact: true }).click();
+  const address = new URL((await transfer).url());
+  assert.equal(address.hostname, 'mooc1.chaoxing.com');
+  assert.equal(new URL(address.searchParams.get('refer')).searchParams.get('chapterId'), '102');
+  await page.waitForURL(url => url.pathname === '/mycourse/studentstudy');
+  await page.addScriptTag({ content: source });
+  await page.waitForFunction(() => window.__plays > 0);
+  assert.equal(await page.getByRole('button', { name: '暂停队列', exact: true }).isEnabled(), true);
+});
+
+test('Chaoxing study view advances when the active chapter unfinished task count becomes zero', async t => {
+  const url = 'https://mooc1.chaoxing.com/mycourse/studentstudy?courseid=11&clazzid=90';
+  const page = await pageFor(t, { url, fixture: () => `<!doctype html><title>高等数学</title>
+    <a href="${url}">高等数学</a><input type="hidden" id="curChapterId" value="101">
+    <div class="posCatalog_select"><button onclick="getTeacherAjax(11,90,101)">第一章</button><input type="hidden" class="jobUnfinishCount" value="1"></div>
+    <div class="posCatalog_select"><button onclick="getTeacherAjax(11,90,102)">第二章</button><input type="hidden" class="jobUnfinishCount" value="2"></div>
+    <script>function getTeacherAjax(course, group, chapter) { document.querySelector('#curChapterId').value = String(chapter); }</script>
+    <video id="video" style="width:260px;height:150px"></video>` });
+  await readCatalog(page);
+  await page.getByRole('button', { name: /高等数学/ }).click();
+  await page.getByRole('button', { name: '开始学习', exact: true }).click();
+  await page.waitForFunction(() => window.__plays > 0);
+  assert.equal(await page.locator('#curChapterId').inputValue(), '101');
+  await page.locator('.jobUnfinishCount').first().evaluate(input => { input.value = '0'; });
+  await page.waitForFunction(() => document.querySelector('#curChapterId').value === '102');
+});
 test('copy unlock preserves default events and is reversible',async t=>{
   const page=await pageFor(t);await tab(page,'设置');await page.getByText('允许页面文字选中、复制和粘贴',{exact:true}).click();await page.getByRole('button',{name:'保存设置',exact:true}).click();
   const allowed=await page.evaluate(()=>{document.body.addEventListener('copy',e=>e.preventDefault());return document.body.dispatchEvent(new Event('copy',{bubbles:true,cancelable:true}));});assert.equal(allowed,true);

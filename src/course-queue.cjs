@@ -22,7 +22,7 @@ function identify(value) {
   const { platform, url } = supported;
   const params = new URLSearchParams([...url.searchParams].map(([key, value]) => [key.toLowerCase(), value]));
   if (platform === 'chaoxing') {
-    const course = params.get('courseid');
+    const course = params.get('courseid') || (/\/mycourse\/transfer\/?$/i.test(url.pathname) ? params.get('moocid') : null);
     const group = params.get('clazzid') || params.get('classid');
     if (course && group) return `cx:${course}:${group}`;
   } else {
@@ -156,7 +156,8 @@ function chapterStatus(element) {
   if (explicit === 'pending') return 'pending';
   if (explicit === 'locked' || element.matches('[aria-disabled=true], .catalog_points_sa, .catalog_points_er') || element.querySelector('.catalog_points_sa, .catalog_points_er, [aria-disabled=true]')) return 'locked';
   if (element.querySelector('.icon_yiwanc, .icon_Completed, .zhihuishu-wancheng, .icon-finish, .time_icofinish')) return 'done';
-  const count = element.querySelector('input.knowledgeJobCount')?.value || text(element.querySelector('.catalog_points_yi .orangeNew, .catalog_points_yi'));
+  const counter = element.querySelector('input.knowledgeJobCount, input.jobUnfinishCount');
+  const count = (counter?.value || text(element.querySelector('.catalog_points_yi .orangeNew, .catalog_points_yi'))).trim();
   if (/^\d+$/.test(count)) return Number(count) > 0 ? 'pending' : 'done';
   const percent = text(element.querySelector('.progress-num, [data-progress]'));
   if (/^\d+\s*%$/.test(percent)) return parseInt(percent, 10) >= 100 ? 'done' : 'pending';
@@ -164,17 +165,52 @@ function chapterStatus(element) {
 }
 
 function catalog(docs, visible) {
-  const selectors = ['[data-course-chapter]', '.posCatalog_select:not(.firstLayer)', '.chapter_item', 'li.video', '.item-content:has(.progress-num)', '.file-item:has(.file-rate)'].join(',');
+  const selectors = ['[data-course-chapter]', '.posCatalog_select:not(.firstLayer)', '.chapter_item:has([onclick*="toOld"])', '.chapter_item[onclick*="toOld"]', 'li.video', '.item-content:has(.progress-num)', '.file-item:has(.file-rate)'].join(',');
   for (const doc of docs) {
     const rows = [...doc.querySelectorAll(selectors)].filter(visible);
     if (!rows.length) continue;
     return rows.map(element => {
-      const control = element.matches('[onclick], button, a[href]') ? element : element.querySelector('a[href], button, [role=button], [onclick]') || element;
-      const active = element.matches('.posCatalog_active,.current_play,[aria-current="true"],[aria-current="page"],[data-current="true"]');
+      const platformAction = '[onclick*="toOld"], [onclick*="getTeacherAjax"]';
+      const control = element.matches(platformAction) ? element
+        : element.querySelector(platformAction) || (element.matches('button, a[href], [onclick]') ? element : element.querySelector('a[href], button, [role=button], [onclick]') || element);
+      const currentId = doc.querySelector('#curChapterId')?.value;
+      const actionId = control.getAttribute('onclick')?.match(/\bgetTeacherAjax\([^,]+,[^,]+,\s*['"]?(\d+)/)?.[1];
+      const active = Boolean(currentId && actionId === currentId) || element.matches('.posCatalog_active,.current_play,[aria-current="true"],[aria-current="page"],[data-current="true"]');
       return { control, title: text(element.querySelector('[data-chapter-title], .catalogue_title') || control).slice(0, 100), active, status: chapterStatus(element) };
     });
   }
   return [];
 }
 
-module.exports = { site, identify, courseLink, readCourses, cleanQueue, currentCourse, begin, pause, resolve, mergeLegacy, handoffURL, readHandoff, catalog, HOLD_MS };
+function chaoxingChapterEntry(control, currentPage, courseId) {
+  const action = control.getAttribute('onclick') || '';
+  const chapter = action.match(/\btoOld\(\s*(?:['"]?\d+['"]?|[a-zA-Z_$][\w.$]*)\s*,\s*['"]?(\d+)['"]?\s*(?=[,)])/)?.[1];
+  if (!chapter) return null;
+  const page = site(currentPage);
+  const directory = site(control.ownerDocument.URL);
+  if (page?.platform !== 'chaoxing' || directory?.platform !== 'chaoxing') return null;
+  const [family, course, group] = courseId.split(':');
+  if (family !== 'cx' || ![course, group].every(value => /^\d+$/.test(value || ''))) return null;
+  if (identify(page.url.href) !== courseId) return null;
+  const directoryParams = new URLSearchParams([...directory.url.searchParams].map(([key, value]) => [key.toLowerCase(), value]));
+  if ((directoryParams.has('courseid') && directoryParams.get('courseid') !== course) ||
+      (directoryParams.has('clazzid') && directoryParams.get('clazzid') !== group)) return null;
+  const enc = control.ownerDocument.querySelector('#oldenc')?.value;
+  let legacyToken = /^[\w-]+$/.test(enc || '') ? enc : '';
+  let cpi = directoryParams.get('cpi') || page.url.searchParams.get('cpi') || control.ownerDocument.querySelector('#cpi')?.value;
+  for (const script of control.ownerDocument.querySelectorAll('script:not([src])')) {
+    const declaration = script.textContent;
+    legacyToken ||= declaration.match(/\b(?:const|let|var)\s+enc\s*=\s*['"]([\w-]+)['"]/)?.[1];
+    cpi ||= declaration.match(/\b(?:const|let|var)\s+cpi\s*=\s*['"]?(\d+)\b/)?.[1];
+    if (legacyToken && cpi) break;
+  }
+  if (!legacyToken || !/^\d+$/.test(cpi || '')) return null;
+  const studyHost = 'https://mooc1.chaoxing.com';
+  const study = new URL('/mycourse/studentstudy', studyHost);
+  study.search = new URLSearchParams({ courseId: course, clazzid: group, chapterId: chapter, cpi, enc: legacyToken, mooc2: '1', hidetype: '0', fanyaVersion: '0' });
+  const transfer = new URL('/mycourse/transfer', studyHost);
+  transfer.search = new URLSearchParams({ moocId: course, clazzid: group, refer: study.href, linkTime: String(Date.now()), ut: 's' });
+  return transfer;
+}
+
+module.exports = { site, identify, courseLink, readCourses, cleanQueue, currentCourse, begin, pause, resolve, mergeLegacy, handoffURL, readHandoff, catalog, chaoxingChapterEntry, HOLD_MS };

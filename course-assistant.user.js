@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         课程助手
 // @namespace    https://github.com/CrystalXHorizon/course-assistant
-// @version      1.1.0
+// @version      1.1.1
 // @description  独立实现的课程队列、视频控制、题目与 DeepSeek 辅助、定时刷新工具。所有任务手动启动。
 // @author       CrystalXHorizon
 // @license      MIT
@@ -288,7 +288,7 @@ function identify(value) {
   const { platform, url } = supported;
   const params = new URLSearchParams([...url.searchParams].map(([key, value]) => [key.toLowerCase(), value]));
   if (platform === 'chaoxing') {
-    const course = params.get('courseid');
+    const course = params.get('courseid') || (/\/mycourse\/transfer\/?$/i.test(url.pathname) ? params.get('moocid') : null);
     const group = params.get('clazzid') || params.get('classid');
     if (course && group) return `cx:${course}:${group}`;
   } else {
@@ -422,7 +422,8 @@ function chapterStatus(element) {
   if (explicit === 'pending') return 'pending';
   if (explicit === 'locked' || element.matches('[aria-disabled=true], .catalog_points_sa, .catalog_points_er') || element.querySelector('.catalog_points_sa, .catalog_points_er, [aria-disabled=true]')) return 'locked';
   if (element.querySelector('.icon_yiwanc, .icon_Completed, .zhihuishu-wancheng, .icon-finish, .time_icofinish')) return 'done';
-  const count = element.querySelector('input.knowledgeJobCount')?.value || text(element.querySelector('.catalog_points_yi .orangeNew, .catalog_points_yi'));
+  const counter = element.querySelector('input.knowledgeJobCount, input.jobUnfinishCount');
+  const count = (counter?.value || text(element.querySelector('.catalog_points_yi .orangeNew, .catalog_points_yi'))).trim();
   if (/^\d+$/.test(count)) return Number(count) > 0 ? 'pending' : 'done';
   const percent = text(element.querySelector('.progress-num, [data-progress]'));
   if (/^\d+\s*%$/.test(percent)) return parseInt(percent, 10) >= 100 ? 'done' : 'pending';
@@ -430,24 +431,59 @@ function chapterStatus(element) {
 }
 
 function catalog(docs, visible) {
-  const selectors = ['[data-course-chapter]', '.posCatalog_select:not(.firstLayer)', '.chapter_item', 'li.video', '.item-content:has(.progress-num)', '.file-item:has(.file-rate)'].join(',');
+  const selectors = ['[data-course-chapter]', '.posCatalog_select:not(.firstLayer)', '.chapter_item:has([onclick*="toOld"])', '.chapter_item[onclick*="toOld"]', 'li.video', '.item-content:has(.progress-num)', '.file-item:has(.file-rate)'].join(',');
   for (const doc of docs) {
     const rows = [...doc.querySelectorAll(selectors)].filter(visible);
     if (!rows.length) continue;
     return rows.map(element => {
-      const control = element.matches('[onclick], button, a[href]') ? element : element.querySelector('a[href], button, [role=button], [onclick]') || element;
-      const active = element.matches('.posCatalog_active,.current_play,[aria-current="true"],[aria-current="page"],[data-current="true"]');
+      const platformAction = '[onclick*="toOld"], [onclick*="getTeacherAjax"]';
+      const control = element.matches(platformAction) ? element
+        : element.querySelector(platformAction) || (element.matches('button, a[href], [onclick]') ? element : element.querySelector('a[href], button, [role=button], [onclick]') || element);
+      const currentId = doc.querySelector('#curChapterId')?.value;
+      const actionId = control.getAttribute('onclick')?.match(/\bgetTeacherAjax\([^,]+,[^,]+,\s*['"]?(\d+)/)?.[1];
+      const active = Boolean(currentId && actionId === currentId) || element.matches('.posCatalog_active,.current_play,[aria-current="true"],[aria-current="page"],[data-current="true"]');
       return { control, title: text(element.querySelector('[data-chapter-title], .catalogue_title') || control).slice(0, 100), active, status: chapterStatus(element) };
     });
   }
   return [];
 }
 
-module.exports = { site, identify, courseLink, readCourses, cleanQueue, currentCourse, begin, pause, resolve, mergeLegacy, handoffURL, readHandoff, catalog, HOLD_MS };
+function chaoxingChapterEntry(control, currentPage, courseId) {
+  const action = control.getAttribute('onclick') || '';
+  const chapter = action.match(/\btoOld\(\s*(?:['"]?\d+['"]?|[a-zA-Z_$][\w.$]*)\s*,\s*['"]?(\d+)['"]?\s*(?=[,)])/)?.[1];
+  if (!chapter) return null;
+  const page = site(currentPage);
+  const directory = site(control.ownerDocument.URL);
+  if (page?.platform !== 'chaoxing' || directory?.platform !== 'chaoxing') return null;
+  const [family, course, group] = courseId.split(':');
+  if (family !== 'cx' || ![course, group].every(value => /^\d+$/.test(value || ''))) return null;
+  if (identify(page.url.href) !== courseId) return null;
+  const directoryParams = new URLSearchParams([...directory.url.searchParams].map(([key, value]) => [key.toLowerCase(), value]));
+  if ((directoryParams.has('courseid') && directoryParams.get('courseid') !== course) ||
+      (directoryParams.has('clazzid') && directoryParams.get('clazzid') !== group)) return null;
+  const enc = control.ownerDocument.querySelector('#oldenc')?.value;
+  let legacyToken = /^[\w-]+$/.test(enc || '') ? enc : '';
+  let cpi = directoryParams.get('cpi') || page.url.searchParams.get('cpi') || control.ownerDocument.querySelector('#cpi')?.value;
+  for (const script of control.ownerDocument.querySelectorAll('script:not([src])')) {
+    const declaration = script.textContent;
+    legacyToken ||= declaration.match(/\b(?:const|let|var)\s+enc\s*=\s*['"]([\w-]+)['"]/)?.[1];
+    cpi ||= declaration.match(/\b(?:const|let|var)\s+cpi\s*=\s*['"]?(\d+)\b/)?.[1];
+    if (legacyToken && cpi) break;
+  }
+  if (!legacyToken || !/^\d+$/.test(cpi || '')) return null;
+  const studyHost = 'https://mooc1.chaoxing.com';
+  const study = new URL('/mycourse/studentstudy', studyHost);
+  study.search = new URLSearchParams({ courseId: course, clazzid: group, chapterId: chapter, cpi, enc: legacyToken, mooc2: '1', hidetype: '0', fanyaVersion: '0' });
+  const transfer = new URL('/mycourse/transfer', studyHost);
+  transfer.search = new URLSearchParams({ moocId: course, clazzid: group, refer: study.href, linkTime: String(Date.now()), ut: 's' });
+  return transfer;
+}
+
+module.exports = { site, identify, courseLink, readCourses, cleanQueue, currentCourse, begin, pause, resolve, mergeLegacy, handoffURL, readHandoff, catalog, chaoxingChapterEntry, HOLD_MS };
 
 return module.exports;
 })();
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const STYLE = ":host{all:initial;font-family:\"Microsoft YaHei\",system-ui,sans-serif;color:#283851;color-scheme:light;font-size:13px;line-height:1.65}*{box-sizing:border-box}button,input,textarea,select{font:inherit}button,a,input,textarea,select{touch-action:manipulation}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}[hidden]{display:none!important}\n.window{width:min(420px,calc(100vw - 32px));max-height:calc(100dvh - 40px);display:flex;flex-direction:column;background:#fff;border:1px solid #dce5f1;border-radius:18px;box-shadow:0 16px 65px #16315429;overflow:hidden}header{display:flex;align-items:center;justify-content:space-between;padding:17px 18px;background:#f7f9fd;border-bottom:1px solid #e8edf5;cursor:move;touch-action:none}.brand{display:flex;gap:10px;align-items:center}.brand strong{font-size:16px;letter-spacing:.5px}.brand small{display:block;font-size:8px;letter-spacing:1.1px;color:#96a5bc}.mark,.launcher{background:#3461d8;color:white;display:grid;place-items:center;font-size:19px;font-weight:600;border-radius:11px;width:36px;height:36px}.launcher{width:54px;height:54px;border:3px solid white;border-radius:18px;box-shadow:0 5px 24px #16315430}\nbutton{border:1px solid #dce5f1;border-radius:8px;background:#fff;color:#566b8d;padding:8px 11px;transition:background .12s,border-color .12s}button:hover:not(:disabled){background:#f1f5ff;border-color:#b5c8ef}button.primary{background:#3461d8;color:white;border-color:#3461d8;flex:1}button.primary:hover:not(:disabled){background:#284fb8}.quiet{background:transparent;border-color:transparent}.small{font-size:10px;padding:5px}.icon{width:28px;height:28px;padding:0;font-size:20px}.row{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.row>*{min-width:0}nav{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:11px 14px;border-bottom:1px solid #edf1f7;flex-shrink:0}.nav-button{border-color:transparent;font-size:12px;padding:8px 2px;color:#7c8ca4}.nav-button[aria-pressed=true]{color:#3461d8;background:#eef3ff;border-color:#e0e8fc;font-weight:600}\nmain{overflow-y:auto;min-height:0;scrollbar-width:thin;scrollbar-color:#d8e1ef transparent;overscroll-behavior:contain}.panel{padding:21px}.eyebrow{font-size:10px;letter-spacing:1.4px;color:#869aba;font-weight:600}h1{font-size:23px;letter-spacing:-.7px;margin:6px 0}h2{font-size:20px;margin:0 0 3px;color:#24354e}h3{font-size:13px;margin:18px 0 8px}.hint{font-size:11px;line-height:1.85;color:#8796ab;margin:5px 0 14px}.section-title{margin-bottom:17px}.status-card{display:flex;gap:8px;align-items:center;background:#f7f9fc;border:1px solid #e7edf5;padding:11px 13px;border-radius:9px;font-size:11px;color:#7185a3;margin:18px 0}.dot{width:6px;height:6px;border-radius:50%;background:#89a1c6}.cards{display:grid;grid-template-columns:1fr 1fr;gap:10px}.card{display:flex;flex-direction:column;align-items:flex-start;gap:7px;padding:14px;text-align:left;border-radius:12px}.card strong{font-size:13px;color:#344a6c}.card small{font-size:10px;color:#8a99b0}.card-icon{display:grid;place-items:center;width:31px;height:31px;background:#eef3ff;color:#4973da;border-radius:8px;font-size:20px;margin-bottom:4px}.note{padding:12px 13px;border-radius:9px;background:#faf8f3;border:1px solid #efe9dd;font-size:11px;color:#8a795a;margin:17px 0 12px;line-height:1.8}.note .hint{color:inherit;margin:4px 0 0}.link{color:#5276cb;border:0;padding:3px 0;background:none;text-decoration:none;font-size:11px}.row .link{margin-right:15px}\n.field{display:block;margin:14px 0}.field>span{display:block;font-size:11px;color:#617591;margin:0 0 6px}input:not([type=checkbox]),textarea,select{width:100%;min-width:0;border:1px solid #dce5f1;background:white;color:#324663;border-radius:8px;padding:9px 11px}input::placeholder,textarea::placeholder{color:#b1bdce}textarea{resize:vertical;min-height:75px;max-height:240px}.check{display:flex;align-items:center;gap:7px;font-size:11px;color:#6c7f9c;margin:15px 0}.check input{accent-color:#3461d8}.countdown{display:flex;flex-direction:column;padding:16px 18px;border-radius:12px;background:#f4f7fc;margin:15px 0}.countdown small{font-size:11px;color:#8799b5}.countdown strong{font-size:44px;line-height:1.4;color:#3461d8;letter-spacing:1px;font-variant-numeric:tabular-nums}.presets{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.presets button{font-size:11px;padding:7px 1px}\n.stack{display:flex;flex-direction:column;gap:9px;margin-top:14px}.list-item{border:1px solid #e3eaf4;background:#fbfcfe;border-radius:10px;padding:12px}.list-item strong{font-size:12px;overflow-wrap:anywhere}.list-item .hint{margin:4px 0 8px;overflow-wrap:anywhere}.list-item button{font-size:11px;padding:5px 9px}.question{border:1px solid #e2e9f3;border-radius:10px;padding:13px;overflow-wrap:anywhere}.question p{font-size:12px}.question-head{display:flex;gap:9px;align-items:center;font-size:12px}.tag{background:#eef3ff;color:#6f8cbd;padding:2px 6px;font-size:10px;border-radius:4px}.option{font-size:11px;color:#7387a5;margin:5px 0}.answer{font-size:12px;background:#f2f7ff;border-radius:8px;padding:11px;margin:12px 0;white-space:pre-wrap}.question .row{margin-top:10px}.question button{font-size:11px;padding:5px 10px}details{font-size:11px;overflow-wrap:anywhere;margin:12px 0;color:#6d819e}summary{cursor:pointer}details p{white-space:pre-wrap;line-height:1.8}.chat-list{max-height:300px;overflow:auto;scrollbar-width:thin}.message{padding:11px 13px;margin-bottom:10px;border:1px solid #e5ecf5;border-radius:10px;background:#f7f9fc;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.message.user{background:#eff4ff;border-color:#e4ecfc}.message small{color:#8b9cba;font-size:10px;display:block;margin-bottom:5px}.log-list{max-height:230px;overflow:auto;background:#f7f9fc;border-radius:9px;font-size:11px}.log-line{padding:9px 11px;border-bottom:1px solid #e9eef6;overflow-wrap:anywhere}\nfooter{display:flex;justify-content:space-between;font-size:10px;color:#9aa9bf;padding:10px 18px;border-top:1px solid #edf1f7}#notice{font-size:10px;line-height:1.7;padding:0 18px 12px;color:#8093b0;overflow-wrap:anywhere}#notice.error{color:#b05a54}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #90adef;outline-offset:2px}@media(max-width:480px){.panel{padding:16px}header{padding:14px}h1{font-size:21px}.window{max-height:calc(100dvh - 32px)}}\n\n.queue-candidates{display:grid;gap:7px;margin:12px 0 16px;max-height:300px;overflow:auto;scrollbar-width:thin}\n.queue-choice{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;text-align:left;color:#30466a;overflow-wrap:anywhere}\n.queue-choice[aria-pressed=true],.queue-item.current{background:#f0f5ff;border-color:#c6d7f7}\n.queue-choice small{display:block;color:#7385a1;font-size:10px}\n.queue-index{display:grid;place-items:center;flex:0 0 25px;height:25px;border-radius:7px;background:#eaf0fc;color:#3461d8}\n.queue-choice[aria-pressed=true] .queue-index{background:#3461d8;color:white;font-weight:700}\n.queue-run progress{display:block;width:100%;height:9px;margin-top:13px;accent-color:#3461d8}\n.queue-run .row{margin:11px 0}.queue-current{overflow-wrap:anywhere}\n.queue-item{display:flex;gap:9px;align-items:center}.queue-item-main{min-width:0;flex:1}.queue-item .tag{white-space:nowrap}.queue-item .hint{margin:4px 0 0}\n";
 function createQueuePanel({ element, button, hint, field, row, title, notice, log, read, write, sessionRead, sessionWrite, refresh, media, play, beforeStart, safeAction }) {
   const platform = Queue.site(location.href)?.platform;
@@ -691,14 +727,22 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     viewedURL = location.href;
     attempted = new WeakMap();
     entryTime = Date.now();
+    catalogRequested = false;
+    activeChapter = null;
+    switched = null;
+    lastSwitch = 0;
+    confirmedCompleteAt = 0;
     if (Queue.identify(location.href) === Queue.currentCourse(queue)?.id) return;
     const url = Queue.courseLink(target, location.href, platform);
     if (!url) { stop('课程入口无法识别，请打开课程后继续。'); return; }
+    navigateToCourse(url);
+  }
+  function navigateToCourse(url) {
     const ticket = newToken();
     Object.assign(queue, { ticket, handoff: Queue.identify(url.href), lease: Date.now() + Queue.HOLD_MS });
     save();
-    departure = true;
     location.assign(Queue.handoffURL(url.href, ticket).href);
+    departure = true;
   }
   function finish(status, reason) {
     sync();
@@ -759,20 +803,22 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
       if (!isOwner()) { player.pause(); return; }
     }
     const playing = players.some(player => !player.paused && !player.ended);
-    if (!playing && (!chapter || chapter.status === 'done') && now - lastSwitch > 2500) {
-      const next = chapters.find(chapter => chapter.status === 'pending' && !chapter.active);
+    if ((!playing || chapter?.status === 'done') && (!chapter || chapter.status === 'done') && now - lastSwitch > 2500) {
+      const next = chapters.find(chapter => chapter.status === 'pending' && !chapter.active)
+        || (!chapter && platform === 'chaoxing' && chapters.find(row => row.status === 'unknown' && /\btoOld\(/.test(row.control.getAttribute('onclick') || '')));
       if (next && switched !== next.control) {
         switched = next.control;
         lastSwitch = now;
-        const link = Queue.courseLink(next.control.getAttribute('href'), next.control.ownerDocument.baseURI, platform);
-        if (link && Queue.identify(link.href) === item.id && link.origin !== location.origin) {
-          const ticket = newToken();
-          Object.assign(queue, { ticket, handoff: item.id, lease: now + Queue.HOLD_MS });
-          save();
-          departure = true;
-          location.assign(Queue.handoffURL(link.href, ticket).href);
-        } else if (next.control.matches('a[target="_blank"]') && link && Queue.identify(link.href) === item.id) {
-          location.assign(link.href);
+        for (const player of players) player.pause();
+        const href = next.control.getAttribute('href');
+        const direct = href && Queue.courseLink(href, next.control.ownerDocument.baseURI, platform);
+        const link = direct || (platform === 'chaoxing' && Queue.chaoxingChapterEntry(next.control, location.href, item.id));
+        const changesPage = link && (link.origin !== location.origin || link.pathname !== location.pathname || link.search !== location.search);
+        if (changesPage && Queue.identify(link.href) === item.id) {
+          navigateToCourse(link);
+        } else if (/\btoOld\(/.test(next.control.getAttribute('onclick') || '')) {
+          stop('已找到待学章节，但学习通未提供可用的学习入口。请手动打开这一章后点击继续。');
+          return;
         } else {
           next.control.click();
         }
