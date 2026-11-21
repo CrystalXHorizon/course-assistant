@@ -137,6 +137,14 @@ function mergeLegacy(value, platform) {
 
 function handoffURL(value, ticket) {
   const url = new URL(value);
+  // The transfer page navigates to its refer parameter and may discard its own fragment.
+  if (url.pathname === '/mycourse/transfer') {
+    const study = site(url.searchParams.get('refer'));
+    if (study?.url.origin === url.origin && study.url.pathname === '/mycourse/studentstudy' && identify(study.url.href) === identify(url.href)) {
+      url.searchParams.set('refer', handoffURL(study.url.href, ticket).href);
+      return url;
+    }
+  }
   url.hash = new URLSearchParams([[HANDOFF_KEY, ticket], ['original', url.hash.slice(1)]]).toString();
   return url;
 }
@@ -164,30 +172,59 @@ function chapterStatus(element) {
   return 'unknown';
 }
 
-function catalog(docs, visible) {
-  const selectors = ['[data-course-chapter]', '.posCatalog_select:not(.firstLayer)', '.chapter_item:has([onclick*="toOld"])', '.chapter_item[onclick*="toOld"]', 'li.video', '.item-content:has(.progress-num)', '.file-item:has(.file-rate)'].join(',');
+function catalog(docs, visible, directoryOnly = false) {
+  const directoryRows = '.chapter_item:has([onclick*="toOld"]), .chapter_item[onclick*="toOld"]';
+  const studyAction = '[onclick*="getTeacherAjax"]';
+  const selectors = directoryOnly ? directoryRows : ['[data-course-chapter]', '.posCatalog_select:not(.firstLayer)', directoryRows, 'li.video', '.item-content:has(.progress-num)', '.file-item:has(.file-rate)'].join(',');
   for (const doc of docs) {
-    const rows = [...doc.querySelectorAll(selectors)].filter(visible);
+    // Some study pages put the task count beside the chapter link, with no row class.
+    const actions = directoryOnly ? [] : [...doc.querySelectorAll(studyAction)].filter(el => /\bgetTeacherAjax\s*\([^,]+,[^,]+,\s*['"]?\d+/.test(el.getAttribute('onclick')));
+    if (actions.length) {
+      const current = doc.querySelector('#curChapterId')?.value;
+      return actions.map(control => {
+        const row = control.closest('.posCatalog_select') || control.parentElement;
+        const id = control.getAttribute('onclick').match(/\bgetTeacherAjax\s*\([^,]+,[^,]+,\s*['"]?(\d+)/)[1];
+        return { control, title: text(row.querySelector('.posCatalog_name') || control).slice(0, 100),
+          active: current ? id === current : row.matches('.posCatalog_active'), status: chapterStatus(row) };
+      });
+    }
+    const rows = [...doc.querySelectorAll(selectors)].filter(row => row.matches(directoryRows) || visible(row));
     if (!rows.length) continue;
     return rows.map(element => {
       const platformAction = '[onclick*="toOld"], [onclick*="getTeacherAjax"]';
       const control = element.matches(platformAction) ? element
         : element.querySelector(platformAction) || (element.matches('button, a[href], [onclick]') ? element : element.querySelector('a[href], button, [role=button], [onclick]') || element);
-      const currentId = doc.querySelector('#curChapterId')?.value;
-      const actionId = control.getAttribute('onclick')?.match(/\bgetTeacherAjax\([^,]+,[^,]+,\s*['"]?(\d+)/)?.[1];
-      const active = Boolean(currentId && actionId === currentId) || element.matches('.posCatalog_active,.current_play,[aria-current="true"],[aria-current="page"],[data-current="true"]');
+      const active = element.matches('.posCatalog_active,.current_play,[aria-current="true"],[aria-current="page"],[data-current="true"]');
       return { control, title: text(element.querySelector('[data-chapter-title], .catalogue_title') || control).slice(0, 100), active, status: chapterStatus(element) };
     });
   }
   return [];
 }
 
-function chaoxingChapterEntry(control, currentPage, courseId) {
+function isChaoxingHome(currentPage) {
+  const page = site(currentPage);
+  return page?.platform === 'chaoxing' && /\/(?:mycourse|fanyav3)\/stu\/?$/i.test(page.url.pathname);
+}
+
+function chaoxingCatalogURL(home, currentPage, courseId, entryURL) {
+  if (!isChaoxingHome(currentPage) || identify(currentPage) !== courseId) return null;
+  const url = new URL(currentPage);
+  const [, course, group] = courseId.split(':');
+  const params = url.searchParams;
+  const enc = home.querySelector('#enc')?.value || params.get('stuenc') || params.get('enc');
+  const cpi = home.querySelector('#cpi')?.value || params.get('cpi') || site(entryURL)?.url.searchParams.get('cpi');
+  if (!enc || !cpi) return null;
+  const endpoint = new URL('/mooc2-ans/mycourse/studentcourse', url);
+  endpoint.search = new URLSearchParams({ courseid: course, clazzid: group, cpi, stuenc: enc, ut: 's' });
+  return endpoint;
+}
+
+function chaoxingChapterEntry(control, currentPage, courseId, home, directoryURL, entryURL) {
   const action = control.getAttribute('onclick') || '';
-  const chapter = action.match(/\btoOld\(\s*(?:['"]?\d+['"]?|[a-zA-Z_$][\w.$]*)\s*,\s*['"]?(\d+)['"]?\s*(?=[,)])/)?.[1];
+  const chapter = action.match(/\btoOld\s*\([^,()]*,\s*['"]?(\d+)['"]?\s*(?=[,)])/)?.[1];
   if (!chapter) return null;
   const page = site(currentPage);
-  const directory = site(control.ownerDocument.URL);
+  const directory = site(directoryURL || control.ownerDocument.URL);
   if (page?.platform !== 'chaoxing' || directory?.platform !== 'chaoxing') return null;
   const [family, course, group] = courseId.split(':');
   if (family !== 'cx' || ![course, group].every(value => /^\d+$/.test(value || ''))) return null;
@@ -204,6 +241,8 @@ function chaoxingChapterEntry(control, currentPage, courseId) {
     cpi ||= declaration.match(/\b(?:const|let|var)\s+cpi\s*=\s*['"]?(\d+)\b/)?.[1];
     if (legacyToken && cpi) break;
   }
+  legacyToken ||= home?.querySelector('#oldenc')?.value;
+  cpi ||= home?.querySelector('#cpi')?.value || site(entryURL)?.url.searchParams.get('cpi');
   if (!legacyToken || !/^\d+$/.test(cpi || '')) return null;
   const studyHost = 'https://mooc1.chaoxing.com';
   const study = new URL('/mycourse/studentstudy', studyHost);
@@ -213,4 +252,4 @@ function chaoxingChapterEntry(control, currentPage, courseId) {
   return transfer;
 }
 
-module.exports = { site, identify, courseLink, readCourses, cleanQueue, currentCourse, begin, pause, resolve, mergeLegacy, handoffURL, readHandoff, catalog, chaoxingChapterEntry, HOLD_MS };
+module.exports = { site, identify, courseLink, readCourses, cleanQueue, currentCourse, begin, pause, resolve, mergeLegacy, handoffURL, readHandoff, catalog, isChaoxingHome, chaoxingCatalogURL, chaoxingChapterEntry, HOLD_MS };

@@ -21,6 +21,8 @@ const metadata = `// ==UserScript==
 // @connect      chaoxing.com
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_getTab
+// @grant        GM_saveTab
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
 // @noframes

@@ -23,6 +23,15 @@ after(async()=>{await browser?.close();});
 async function pageFor(t, options = {}){
   const context=await browser.newContext({viewport:{width:1100,height:980}});t.after(()=>context.close());
   const page=await context.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  if (options.tabStorage) {
+    const values = new WeakMap();
+    await context.exposeBinding('testReadTab', ({page}) => values.get(page) || {});
+    await context.exposeBinding('testSaveTab', ({page}, value) => { values.set(page, value); });
+    await context.addInitScript(() => {
+      window.GM_getTab = callback => window.testReadTab().then(callback);
+      window.GM_saveTab = (value, callback) => window.testSaveTab(value).then(callback);
+    });
+  }
   await context.route('**/*',route=>route.request().isNavigationRequest()?route.fulfill({contentType:'text/html; charset=utf-8',body:options.fixture?.(new URL(route.request().url())) ?? fixture}):route.abort());
   await context.addInitScript(useSharedStore=>{
     window.__requests=[];window.__delay=0;window.__apiReply='回答 <img src=x onerror=alert(1)>';window.__apiStatus=200;window.__aborts=0;window.__plays=0;
@@ -210,6 +219,28 @@ test('queue keeps control when the course opens on another platform subdomain',a
   assert.equal(await page.getByRole('button',{name:'暂停队列',exact:true}).isEnabled(),true);
 });
 
+test('only the original tab runs after the course entry redirects across origins without its fragment', async t => {
+  const entry = 'https://mooc1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=22&clazzid=91';
+  const destination = 'https://mooc2-ans.chaoxing.com/mycourse/studentstudy?courseid=22&clazzid=91';
+  const page = await pageFor(t, {sharedStore: true, tabStorage: true, fixture: url => {
+    if (url.pathname === '/demo') return `<a href="${entry}">工程制图</a>`;
+    if (url.pathname.endsWith('/stucoursemiddle')) return `<script>location.replace('${destination}')</script>`;
+    return queueFixture(url);
+  }});
+  await readCatalog(page);
+  await page.getByRole('button', {name: /工程制图/}).click();
+  await page.getByRole('button', {name: '开始学习', exact: true}).click();
+  await page.waitForURL(destination);
+  await page.addScriptTag({content: source});
+  await page.waitForFunction(() => window.__plays > 0, null, {timeout: 5000});
+  const other = await page.context().newPage();
+  await other.goto(destination);
+  await other.addScriptTag({content: source});
+  await other.getByText('在另一标签页运行', {exact: true}).waitFor();
+  assert.equal(await other.getByRole('button', {name: '暂停队列'}).isDisabled(), true);
+  assert.equal(await other.evaluate(() => window.__plays), 0);
+});
+
 test('Chaoxing course home opens its first unfinished chapter through the platform transfer', async t => {
   const home = 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=22&clazzid=91&cpi=10';
   const page = await pageFor(t, {
@@ -238,12 +269,42 @@ test('Chaoxing course home opens its first unfinished chapter through the platfo
   assert.equal(await page.getByRole('button', { name: '暂停队列', exact: true }).isEnabled(), true);
 });
 
+test('Chaoxing reads collapsed chapters from the catalog response and survives a transfer dropping its hash', async t => {
+  const home = 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=22&clazzid=91';
+  const page = await pageFor(t, { url: home, sharedStore: true, fixture: url => {
+    if (url.pathname.endsWith('/stu')) return `<a href="${home}">大学英语</a>
+      <input id="enc" value="catalog_access"><input id="oldenc" value="study_access"><input id="cpi" value="14">`;
+    if (url.pathname.endsWith('/transfer')) return `<script>location.replace(new URL(location.href).searchParams.get('refer'));</script>`;
+    return queueFixture(url);
+  }});
+  let requests = 0;
+  await page.route('**/mycourse/studentcourse?*', async route => {
+    requests++;
+    const params = new URL(route.request().url()).searchParams;
+    assert.deepEqual(['courseid','clazzid','cpi','stuenc','ut'].map(key => params.get(key)), ['22','91','14','catalog_access','s']);
+    await route.fulfill({contentType: 'text/html', body: `<section hidden>
+      <div class="chapter_item" onclick="toOld('', 40)"><i class="icon_yiwanc"></i>第一章</div>
+      <div class="chapter_item" onclick="toOld('', 41)"><input class="knowledgeJobCount" value="2">第二章</div>
+      </section>`});
+  });
+  await readCatalog(page);
+  await page.getByRole('button', {name: /大学英语/}).click();
+  await page.getByRole('button', {name: '开始学习', exact: true}).click();
+  await page.waitForURL(url => url.pathname.endsWith('/studentstudy'), {timeout: 6000});
+  assert.equal(requests, 1);
+  assert.equal(new URL(page.url()).searchParams.get('chapterId'), '41');
+  assert.equal(new URL(page.url()).searchParams.get('enc'), 'study_access');
+  await page.addScriptTag({content: source});
+  await page.waitForFunction(() => window.__plays > 0, null, {timeout: 4000});
+  assert.equal(await page.getByRole('button', {name: '暂停队列', exact:true}).isEnabled(), true);
+});
+
 test('Chaoxing study view advances when the active chapter unfinished task count becomes zero', async t => {
   const url = 'https://mooc1.chaoxing.com/mycourse/studentstudy?courseid=11&clazzid=90';
   const page = await pageFor(t, { url, fixture: () => `<!doctype html><title>高等数学</title>
     <a href="${url}">高等数学</a><input type="hidden" id="curChapterId" value="101">
     <div class="posCatalog_select"><button onclick="getTeacherAjax(11,90,101)">第一章</button><input type="hidden" class="jobUnfinishCount" value="1"></div>
-    <div class="posCatalog_select"><button onclick="getTeacherAjax(11,90,102)">第二章</button><input type="hidden" class="jobUnfinishCount" value="2"></div>
+    <div hidden><button onclick="getTeacherAjax(11,90,102)">第二章</button><input type="hidden" class="jobUnfinishCount" value="2"></div>
     <script>function getTeacherAjax(course, group, chapter) { document.querySelector('#curChapterId').value = String(chapter); }</script>
     <video id="video" style="width:260px;height:150px"></video>` });
   await readCatalog(page);
@@ -253,6 +314,28 @@ test('Chaoxing study view advances when the active chapter unfinished task count
   assert.equal(await page.locator('#curChapterId').inputValue(), '101');
   await page.locator('.jobUnfinishCount').first().evaluate(input => { input.value = '0'; });
   await page.waitForFunction(() => document.querySelector('#curChapterId').value === '102');
+});
+
+test('unavailable catalog endpoint falls back to collapsed chapters in the page', async t => {
+  const home = 'https://mooc2-ans.chaoxing.com/fanyav3/stu?courseid=22&clazzid=91&enc=directory&cpi=15';
+  const page = await pageFor(t, { url: home, sharedStore: true, fixture: url =>
+    url.pathname.endsWith('/stu') ? `<a href="${home}">力学</a><input id="oldenc" value="old_value">
+      <div class="chapter_item" onclick="toOld(22,1)"><i class="icon_yiwanc"></i>第一章</div>
+      <div hidden aria-current="page" class="chapter_item" onclick="toOld(22,2)"><input class="knowledgeJobCount" value="1">第二章</div>
+      <video style="width:260px;height:150px"></video>`
+    : queueFixture(url) });
+  let attempts = 0;
+  await page.route('**/mycourse/studentcourse?*', route => {
+    attempts++;
+    return route.fulfill({status: 503});
+  });
+  await readCatalog(page);
+  await page.getByRole('button', {name: /力学/}).click();
+  await page.getByRole('button', {name: '开始学习', exact: true}).click();
+  await page.waitForURL(url => url.pathname.endsWith('/transfer'), {timeout: 6000});
+  assert.equal(attempts, 1);
+  const study = new URL(new URL(page.url()).searchParams.get('refer'));
+  assert.equal(study.searchParams.get('chapterId'), '2');
 });
 test('copy unlock preserves default events and is reversible',async t=>{
   const page=await pageFor(t);await tab(page,'设置');await page.getByText('允许页面文字选中、复制和粘贴',{exact:true}).click();await page.getByRole('button',{name:'保存设置',exact:true}).click();

@@ -9,10 +9,12 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
   const legacy = Queue.mergeLegacy(sessionRead('queue', null), platform);
   let queue = Queue.cleanQueue(read(key, legacy), platform);
   let owner = sessionRead(ownerKey, '') || newToken();
+  let acceptedTicket = false;
   const incoming = Queue.readHandoff(location.href);
   if (incoming) {
     if (queue.status === 'running' && queue.ticket === incoming.ticket && queue.handoff === Queue.currentCourse(queue)?.id && queue.lease > Date.now() && Queue.identify(incoming.url.href) === queue.handoff) {
       owner = queue.owner;
+      acceptedTicket = true;
       sessionWrite(ownerKey, owner);
       queue.ticket = '';
       queue.handoff = '';
@@ -20,6 +22,21 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     }
     history.replaceState(history.state, '', incoming.url.href);
   }
+  // A course homepage can redirect to another subdomain before our script ever runs.
+  const ownerReady = (async () => {
+    if (typeof GM_getTab !== 'function' || typeof GM_saveTab !== 'function') return;
+    const tab = await new Promise(resolve => GM_getTab(resolve));
+    const field = 'courseAssistantOwner_' + platform;
+    if (!acceptedTicket) {
+      const legacyOwner = queue.status === 'running' && queue.owner === owner && !owner.startsWith('tab-');
+      owner = tab[field] || (legacyOwner ? owner : 'tab-' + newToken());
+    }
+    if (tab[field] !== owner) {
+      tab[field] = owner;
+      await new Promise(resolve => GM_saveTab(tab, resolve));
+    }
+    sessionWrite(ownerKey, owner);
+  })().catch(() => { /* Keep the course ticket and session fallback on other managers. */ });
   const isOwner = () => queue.status === 'running' && queue.owner === owner;
   const isLive = () => queue.status === 'running' && queue.lease > Date.now();
   let candidates = [];
@@ -32,6 +49,9 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
   let lastSwitch = 0;
   let switched = null;
   let catalogRequested = false;
+  let directoryRequest = '';
+  let directoryRows = [];
+  let runGeneration = 0;
   let activeChapter = null;
   let confirmedCompleteAt = 0;
   let attempted = new WeakMap();
@@ -206,6 +226,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
   function stop(message = '课程队列已暂停。') {
     sync();
     if (!isOwner()) return;
+    runGeneration++;
     Queue.pause(queue);
     const item = Queue.currentCourse(queue);
     if (item) item.note = message;
@@ -214,13 +235,15 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     save();
     notice(message);
   }
-  function start() {
+  async function start() {
+    await ownerReady;
     sync();
     if (queue.items.length || !selected.length) return;
     queue = Queue.cleanQueue({ items: selected.map(id => candidates.find(item => item.id === id)).filter(Boolean) }, platform);
     launch();
   }
-  function resume() {
+  async function resume() {
+    await ownerReady;
     sync();
     if (isLive()) return;
     launch();
@@ -237,6 +260,9 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     route(course.lastURL || course.url);
   }
   function route(target) {
+    runGeneration++;
+    directoryRequest = '';
+    directoryRows = [];
     viewedURL = location.href;
     attempted = new WeakMap();
     entryTime = Date.now();
@@ -272,6 +298,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
   }
 
   async function tick() {
+    await ownerReady;
     sync();
     render();
     if (departure || !isOwner()) return;
@@ -291,22 +318,46 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
       viewedURL = location.href;
       entryTime = now;
       catalogRequested = false;
+      directoryRequest = '';
+      directoryRows = [];
       switched = null;
     }
-    const chapters = Queue.catalog(PageDOM.documents(document), PageDOM.visible);
+    const endpoint = Queue.chaoxingCatalogURL(document, location.href, item.id, item.url);
+    if (endpoint && directoryRequest !== endpoint.href) {
+      directoryRequest = endpoint.href;
+      directoryRows = [];
+      const generation = runGeneration;
+      const startedAt = location.href;
+      let rows = [];
+      try {
+        const response = await fetch(endpoint, { credentials: 'same-origin', signal: AbortSignal.timeout(6000) });
+        const finalURL = new URL(response.url);
+        if (response.ok && finalURL.origin === endpoint.origin && finalURL.pathname === endpoint.pathname) {
+          const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+          rows = Queue.catalog([doc], PageDOM.visible, true);
+        }
+      } catch { /* The in-page catalog remains available when the request fails. */ }
+      sync();
+      if (!isOwner() || generation !== runGeneration || startedAt !== location.href || Queue.currentCourse(queue)?.id !== item.id) return;
+      directoryRows = rows;
+    }
+    const docs = PageDOM.documents(document);
+    let homeRows = directoryRows;
+    if (!homeRows.length && Queue.isChaoxingHome(location.href)) homeRows = Queue.catalog(docs, PageDOM.visible, true);
+    const chapters = homeRows.length ? homeRows : Queue.catalog(docs, PageDOM.visible);
     if (chapters.length && chapters.every(chapter => chapter.status === 'done')) {
       confirmedCompleteAt ||= now;
       if (now - confirmedCompleteAt > 1800) finish('done', '平台章节均显示已完成');
       return;
     }
     confirmedCompleteAt = 0;
-    const chapter = chapters.find(chapter => chapter.active);
+    const chapter = !homeRows.length && chapters.find(chapter => chapter.active);
     if (chapter && activeChapter !== chapter.control) {
       activeChapter = chapter.control;
       entryTime = now;
       switched = null;
     }
-    const players = media();
+    const players = homeRows.length ? [] : media();
     for (const player of players) {
       if (player.ended || !player.paused || (attempted.get(player) || 0) > now - 4500) continue;
       if (chapter?.status === 'done') break;
@@ -317,7 +368,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     }
     const playing = players.some(player => !player.paused && !player.ended);
     if ((!playing || chapter?.status === 'done') && (!chapter || chapter.status === 'done') && now - lastSwitch > 2500) {
-      const next = chapters.find(chapter => chapter.status === 'pending' && !chapter.active)
+      const next = chapters.find(chapter => chapter.status === 'pending' && (homeRows.length || !chapter.active))
         || (!chapter && platform === 'chaoxing' && chapters.find(row => row.status === 'unknown' && /\btoOld\(/.test(row.control.getAttribute('onclick') || '')));
       if (next && switched !== next.control) {
         switched = next.control;
@@ -325,7 +376,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
         for (const player of players) player.pause();
         const href = next.control.getAttribute('href');
         const direct = href && Queue.courseLink(href, next.control.ownerDocument.baseURI, platform);
-        const link = direct || (platform === 'chaoxing' && Queue.chaoxingChapterEntry(next.control, location.href, item.id));
+        const link = direct || (platform === 'chaoxing' && Queue.chaoxingChapterEntry(next.control, location.href, item.id, document, directoryRows.length ? directoryRequest : null, item.url));
         const changesPage = link && (link.origin !== location.origin || link.pathname !== location.pathname || link.search !== location.search);
         if (changesPage && Queue.identify(link.href) === item.id) {
           navigateToCourse(link);
