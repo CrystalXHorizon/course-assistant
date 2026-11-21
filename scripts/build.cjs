@@ -32,6 +32,25 @@ const metadata = `// ==UserScript==
 // Install this single file. Source and tests are available in the repository.
 `;
 const wrap = (name,file) => `const ${name} = (() => {\nconst module = { exports: {} };\n${read(file)}\nreturn module.exports;\n})();\n`;
-const output=metadata+'\n(() => {\n"use strict";\n'+wrap('Core','src/core.cjs')+wrap('PageDOM','src/dom.cjs')+wrap('Queue','src/course-queue.cjs')+'const VERSION = '+JSON.stringify(version)+';\nconst STYLE = '+JSON.stringify(read('src/style.css'))+';\n'+read('src/queue-panel.js')+'\n'+read('src/app.js')+'\n})();\n';
+const notices = [
+  'opentype.js', read('node_modules/opentype.js/LICENSE'),
+  'tiny-inflate', read('node_modules/tiny-inflate/LICENSE'),
+  'string.prototype.codepointat', read('node_modules/string.prototype.codepointat/LICENSE-MIT.txt'),
+  'Glyph fingerprints generated from Source Han Sans CN Normal v1.000. Copyright 2014 Adobe Systems Incorporated.',
+  read('docs/Apache-2.0.txt')
+].join('\n');
+const parser = read('node_modules/opentype.js/dist/opentype.min.js').replace(/^\/\/# sourceMappingURL=.*$/gm, '');
+const modules = [
+  '/*\n' + notices + '\n*/',
+  'const FontParser = (() => {const exports = {}; const module = {exports};\n' + parser + '\nreturn exports;})();',
+  'const GLYPH_INDEX = ' + read('src/glyph-index.json') + ';',
+  wrap('glyphKey','src/glyph-key.cjs'), wrap('QuestionFont','src/question-font.cjs'),
+  wrap('QuestionScan','src/question-scan.cjs'), wrap('Core','src/core.cjs'),
+  wrap('PageDOM','src/dom.cjs'), wrap('Queue','src/course-queue.cjs'),
+  'const VERSION = ' + JSON.stringify(version) + ';',
+  'const STYLE = ' + JSON.stringify(read('src/style.css')) + ';',
+  read('src/queue-panel.js'), read('src/app.js')
+];
+const output = metadata + '\n(() => {\n"use strict";\n' + modules.join('\n') + '\n})();\n';
 fs.writeFileSync(path.join(root,'course-assistant.user.js'),output);
 console.log('Built course-assistant.user.js ('+Buffer.byteLength(output)+' bytes)');

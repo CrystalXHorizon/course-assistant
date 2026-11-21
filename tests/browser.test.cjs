@@ -80,6 +80,48 @@ test('scan includes native questions and same-origin frames, excludes ordinary a
   const page=await pageFor(t);await tab(page,'题目');await page.getByRole('button',{name:'扫描本页',exact:true}).click();
   assert.equal(await page.locator('.question').count(),4);await page.getByLabel('搜索已扫描题目').fill('偶数');assert.equal(await page.locator('.question').count(),1);
 });
+test('mixed chapter keeps all 25 questions in order, including split letter rows and flat sibling choices', async t => {
+  const page = await pageFor(t,{fixture: () => {
+    const options = ['AI 技术','实践','奋斗','奉献'];
+    const single = '<article><p>【单选题】选一项。</p><div>' + options.map((s,i) => '<div aria-checked="false"><div><span>'+String.fromCharCode(65+i)+'</span></div><div>'+s+'</div></div>').join('')+'</div></article>';
+    const multi = '<article><p>【多选题】选两项。</p><div>' + options.map((s,i) => '<span aria-checked="false">'+String.fromCharCode(65+i)+'</span><span>'+s+'</span>').join('')+'</div></article>';
+    const judge = '<div class="questionLi"><div class="TiMu" data="3"><div class="Zy_TItle"><span class="fontLabel">此句成立吗？</span></div><ul class="Zy_ulTop"><li aria-label="对选择">✓</li><li aria-label="错选择">✗</li></ul></div></div>';
+    return single.repeat(9)+multi.repeat(6)+judge.repeat(10);
+  }});
+  await tab(page,'题目');
+  await page.getByRole('button',{name:'扫描本页'}).click();
+  const cards = page.locator('#questions .question');
+  assert.equal(await cards.count(),25);
+  assert.deepEqual(await cards.locator('.tag').allTextContents(),[...Array(9).fill('单选'),...Array(6).fill('多选'),...Array(10).fill('判断')]);
+  assert.equal(await cards.first().locator('p').textContent(),'选一项。');
+  assert.deepEqual(await cards.nth(9).locator('.option').allTextContents(),['A. AI 技术','B. 实践','C. 奋斗','D. 奉献']);
+});
+
+test('a per-frame font decodes stem and option text once, preserves plain siblings, and sends readable choices to the API',async t=>{
+  const b64=fs.readFileSync(path.join(__dirname,'fixtures/question-subset.ttf')).toString('base64');
+  const frame='<style>@font-face{font-family:font-cxsecret;src:url(data:font/ttf;base64,'+b64+')} .font-cxsecret{font-family:font-cxsecret}</style>'+
+    '<div class="questionLi"><div class="TiMu" data="1"><div class="Zy_TItle"><i role="option">1</i><span class="newZy_TItle">【多选题】</span><div class="fontLabel" role="option"><b class="font-cxsecret">玢盐</b>：玢</div></div>'+
+    '<ul class="Zy_ulTop" aria-hidden="true">'+['玢','盐','清水'].map((s,i)=>'<li qtype="1" role="checkbox" aria-checked="false" onclick="this.setAttribute(\'aria-checked\',this.getAttribute(\'aria-checked\')===\'true\'?\'false\':\'true\')"><span class="num_option">'+String.fromCharCode(65+i)+'</span><a class="font-cxsecret">'+s+'</a></li>').join('')+'</ul></div></div>';
+  const page=await pageFor(t,{fixture:url=>url.pathname==='/frame'?frame:'<iframe src="/frame"></iframe>'});
+  await configure(page); await tab(page,'题目');
+  await page.getByRole('button',{name:'扫描本页'}).click();
+  assert.equal(await page.locator('.question p').textContent(),'盐会：玢');
+  assert.deepEqual(await page.locator('.question .option').allTextContents(),['A. 盐','B. 会','C. 清水']);
+  await page.getByText('分析后填入已匹配的答案（不提交）',{exact:true}).click();
+  await page.getByRole('button',{name:'分析全部'}).click();
+  await page.locator('.question .answer').waitFor();
+  const payload=await page.evaluate(()=>JSON.parse(JSON.parse(window.__requests[0].data).messages.at(-1).content));
+  assert.equal(payload.question,'盐会：玢');
+  assert.deepEqual(payload.options.map(o=>o.text),['盐','会','清水']);
+  const child=page.frameLocator('iframe');
+  assert.deepEqual(await child.locator('li').evaluateAll(els=>els.map(el=>el.getAttribute('aria-checked'))),['true','false','true']);
+  assert.equal(await child.locator('.fontLabel b').textContent(),'玢盐');
+  await child.locator('.fontLabel b').evaluate(el=>el.textContent='吪');
+  await page.getByRole('button',{name:'扫描本页'}).click();
+  assert.equal(await page.getByRole('button',{name:'分析全部'}).isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'分析',exact:true}).isDisabled(),true);
+});
+
 test('AI analysis fills native answers, corrects wrong checks, and does not submit a form',async t=>{
   const page=await pageFor(t);await configure(page);await tab(page,'题目');await page.getByRole('button',{name:'扫描本页',exact:true}).click();
   await page.getByText('分析后填入已匹配的答案（不提交）',{exact:true}).click();await page.getByRole('button',{name:'分析全部',exact:true}).click();

@@ -166,22 +166,42 @@ main.append(panel('questions',[
   element('label',{class:'check'},[element('input',{id:'autofill',type:'checkbox'}),'分析后填入已匹配的答案（不提交）']),
   field('搜索已扫描题目',element('input',{id:'question-search',type:'search',placeholder:'输入题目关键词',oninput:renderQuestions})),
   element('div',{id:'questions',class:'stack'}),
-  element('details',{},[element('summary',{text:'识别不到题目？'}),hint('当前支持可见、可编辑的标准单选、多选和文本框题目。跨域框架、图片题、封闭组件或特殊选项布局需要人工操作；也可以把题目复制到 AI 页。')])
+  element('details',{},[element('summary',{text:'识别不到题目？'}),hint('请等题干和选项显示后扫描。若题目在独立的跨域框架中，可单独打开题目页再扫描。')])
 ]));
-function scanQuestions(){if(busyAnswer)throw Error('请先停止正在进行的分析。');generation++;questions=PageDOM.scan(document);renderQuestions();notice(`识别到 ${questions.length} 道题，请核对题干和选项。`);log(`扫描到 ${questions.length} 道题`);}
+let scanning = false;
+async function scanQuestions(){
+  if (busyAnswer || scanning) return;
+  const token = ++generation;
+  scanning = true;
+  questions = [];
+  renderQuestions();
+  notice('正在读取题干、选项和页面字体…');
+  try {
+    const found = await PageDOM.scan(document);
+    if (token !== generation) return;
+    questions = found;
+    const counts = new Map();
+    for (const q of found) counts.set(typeLabel(q), (counts.get(typeLabel(q)) || 0) + 1);
+    const summary = [...counts].map(([name, count]) => name + ' ' + count).join('、');
+    notice(`识别到 ${found.length} 道题${summary ? '（' + summary + '）' : ''}。`);
+    log(`扫描到 ${found.length} 道题`);
+  } finally { scanning = false; renderQuestions(); }
+}
+function typeLabel(q){return q.judgment ? '判断' : {single:'单选',multiple:'多选',text:'文本'}[q.kind];}
 function renderQuestions(){
   const filter=($('question-search')?.value||'').trim();
   const list=questions.filter(q=>!filter||q.text.includes(filter));
   $('questions').replaceChildren(...(list.length?list.map(q=>element('article',{class:'question'},[
-    element('div',{class:'question-head'},[element('span',{class:'tag',text:{single:'单选',multiple:'多选',text:'文本'}[q.kind]}),element('strong',{text:`第 ${q.id} 题`})]),
+    element('div',{class:'question-head'},[element('span',{class:'tag',text:typeLabel(q)}),element('strong',{text:`第 ${q.id} 题`})]),
     element('p',{text:q.text}),
     ...q.options.map((option,i)=>element('div',{class:'option',text:`${String.fromCharCode(65+i)}. ${option}`})),
     ...(q.answer?[element('div',{class:'answer',text:`答案：${q.answer.answers.join('、')}\n${q.answer.explanation}`})]:[]),
-    row(button('分析',()=>analyzeAll([q]),{disabled:Boolean(busyAnswer)}),button('填入',()=>{PageDOM.fill(q,q.answer);notice('已填入，请核对后自行提交。');},{disabled:!q.answer||Boolean(busyAnswer)}))
+    q.unresolved ? hint('有字形未能还原，本题已暂停分析。请检查原页面字体后重新扫描。') : null,
+    row(button('分析',()=>analyzeAll([q]),{disabled:q.unresolved||Boolean(busyAnswer)}),button('填入',()=>{PageDOM.fill(q,q.answer);notice('已填入，请核对后自行提交。');},{disabled:!q.editable||!q.answer||Boolean(busyAnswer)}))
   ])):[hint(questions.length?'没有匹配的题目。':'点击“扫描本页”开始。')]));
-  $('analyze-all').disabled=Boolean(busyAnswer)||!questions.length;$('scan').disabled=Boolean(busyAnswer);$('answer-stop').disabled=!busyAnswer;
+  $('analyze-all').disabled=scanning||Boolean(busyAnswer)||!questions.some(q=>!q.unresolved);$('scan').disabled=scanning||Boolean(busyAnswer);$('answer-stop').disabled=!busyAnswer;
 }
-async function analyzeAll(selected=questions){
+async function analyzeAll(selected=questions.filter(q=>!q.unresolved)){
   if(busyAnswer)return;if(!selected.length)throw Error('请先扫描题目。');
   if(!settings.apiKey)throw Error('请先配置 DeepSeek API Key。');
   const controller=new AbortController();busyAnswer=controller;const token=generation;const originalURL=location.href;renderQuestions();
@@ -198,7 +218,7 @@ async function analyzeAll(selected=questions){
       if(controller.signal.aborted || token!==generation || location.href!==originalURL || !question.box.isConnected)break;
       question.answer=Core.parseAnswer(content,question);
       records.push({time:new Date().toISOString(),question:question.text,answer:question.answer.answers.join('、'),explanation:question.answer.explanation});records=records.slice(-100);write('records',records);
-      if($('autofill').checked)PageDOM.fill(question,question.answer);
+      if($('autofill').checked && question.editable)PageDOM.fill(question,question.answer);
       renderQuestions();
     }
     notice(controller.signal.aborted?'已停止分析。':'分析结束，请核对答案。');
