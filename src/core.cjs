@@ -86,9 +86,10 @@ function parseAnswer(text, question) {
   let value;
   try { value = JSON.parse(String(text).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
   catch { throw Error('AI 未返回有效的 JSON 答案，请重试或自行核对。'); }
-  if (!value || !Array.isArray(value.answers) || !value.answers.length || value.answers.some(v => typeof v !== 'string' || !v.trim())) throw Error('答案缺少有效的 answers 数组。');
+  if (!value || !Array.isArray(value.answers) || value.answers.some(v => typeof v !== 'string' || !v.trim())) throw Error('答案缺少有效的 answers 数组。');
   const answers = value.answers.map(v => v.trim());
   const explanation = typeof value.explanation === 'string' ? value.explanation : '';
+  if (!answers.length) throw Error(`AI 未能确定答案。${explanation.trim().slice(0,300) || '请核对题目和选项。'}`);
   if (question.kind === 'text') {
     if (answers.length !== question.fields) throw Error('答案数量与填空数量不一致。');
     return { answers, explanation };

@@ -49,7 +49,7 @@ async function pageFor(t, options = {}){
         if(options.url.endsWith('/models'))response={data:[{id:'deepseek-flash'},{id:'test-model'}]};
         else{
           const data=JSON.parse(options.data);let content=window.__apiReply;
-          if(data.messages[0]?.content.includes('只返回 JSON 对象')){const q=JSON.parse(data.messages.at(-1).content);content=JSON.stringify({answers:q.type==='multiple'?['A','C']:q.type==='text'?['东']:['B'],explanation:'测试解析'});}
+          if(data.messages[0]?.content.includes('只返回 JSON 对象')){const q=JSON.parse(data.messages.at(-1).content);content=JSON.stringify(window.__quizReply ?? {answers:q.type==='multiple'?['A','C']:q.type==='text'?['东']:['B'],explanation:'测试解析'});}
           response={choices:[{finish_reason:'stop',message:{content}}]};
         }
         options.onload({status:window.__apiStatus,responseText:JSON.stringify(response)});
@@ -133,6 +133,20 @@ test('AI analysis fills native answers, corrects wrong checks, and does not subm
   await page.getByRole('button',{name:'分析全部',exact:true}).click();
   await page.waitForFunction(()=>document.getElementById('course-assistant-root').shadowRoot.getElementById('notice').textContent.includes('分析结束'));
   assert.equal(await page.locator('#multi input[value="3"]').isChecked(),false);
+});
+test('judgment sends the displayed label order and abstaining clears the previous suggestion',async t=>{
+  const page=await pageFor(t,{fixture:()=>'<fieldset><legend>【判断题】水的化学式是 H₂O。</legend><label><input type="radio" name="q">A. 错误</label><label><input type="radio" name="q">B. 正确</label></fieldset>'});
+  await configure(page);await tab(page,'题目');await page.getByRole('button',{name:'扫描本页'}).click();
+  const analyze=page.getByRole('button',{name:'分析',exact:true});
+  await analyze.click();await page.locator('.question .answer').waitFor();
+  const messages=await page.evaluate(()=>JSON.parse(__requests.at(-1).data).messages);
+  const q=JSON.parse(messages[1].content);
+  assert.equal(messages[0].role,'system');assert.equal(q.type,'judgment');
+  assert.deepEqual(q.options,[{label:'A',text:'错误'},{label:'B',text:'正确'}]);
+  await page.evaluate(()=>window.__quizReply={answers:[],explanation:'缺少题目引用的图表。'});
+  await analyze.click();await notice(page).filter({hasText:'AI 未能确定答案。缺少题目引用的图表'}).waitFor();
+  assert.equal(await page.locator('.question .answer').count(),0);
+  assert.equal(await page.getByRole('button',{name:'填入',exact:true}).isDisabled(),true);
 });
 test('stale question text is rejected before filling',async t=>{
   const page=await pageFor(t);await configure(page);await tab(page,'题目');await page.getByRole('button',{name:'扫描本页',exact:true}).click();
