@@ -1,16 +1,43 @@
 'use strict';
 
-const defaults = Object.freeze({ apiKey: '', model: 'deepseek-flash', thinking: false, timeout: 120, rate: 1, unlock: false, autoSubmit: false });
+const providers = Object.freeze({
+  deepseek: { name: 'DeepSeek', base: 'https://api.deepseek.com', model: 'deepseek-flash' },
+  qwen: { name: '阿里云百炼（北京）', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  siliconflow: { name: '硅基流动（中国）', base: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V4.1-Flash' },
+  openai: { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4.1-mini' },
+  gemini: { name: 'Google Gemini', base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.1-flash-lite' },
+  openrouter: { name: 'OpenRouter', base: 'https://openrouter.ai/api/v1', model: 'openrouter/free' },
+  ollama: { name: 'Ollama（本机）', base: 'http://localhost:11434/v1', model: 'qwen3:8b' },
+  custom: { name: '自定义兼容接口', base: '', model: '' }
+});
+const validModel = id => typeof id === 'string' && /^[\w][\w./:@-]{0,255}$/.test(id);
+const loopback = host => ['localhost','127.0.0.1','[::1]'].includes(host);
+function customBase(input) {
+  try {
+    const url = new URL(input);
+    if (url.username || url.password || url.search || url.hash ||
+        !(url.protocol === 'https:' || (url.protocol === 'http:' && loopback(url.hostname)))) return '';
+    return url.origin + url.pathname.replace(/\/+$/, '').replace(/\/(chat\/completions|models)$/, '');
+  } catch { return ''; }
+}
+const defaults = Object.freeze({ provider: 'deepseek', base: providers.deepseek.base, apiKey: '', model: providers.deepseek.model, thinking: false, timeout: 120, rate: 1, unlock: false, autoSubmit: false });
 function config(value = {}) {
+  const known = value.provider === undefined || Object.hasOwn(providers, value.provider);
+  const provider = known ? value.provider ?? 'deepseek' : 'custom';
   return {
-    apiKey: typeof value.apiKey === 'string' ? value.apiKey.trim() : '',
-    model: typeof value.model === 'string' && /^[\w.-]{1,100}$/.test(value.model) ? value.model : defaults.model,
+    provider, base: provider === 'custom' ? (known ? customBase(value.base) : '') : providers[provider].base,
+    apiKey: known && typeof value.apiKey === 'string' ? value.apiKey.trim() : '',
+    model: validModel(value.model) ? value.model : providers[provider].model,
     thinking: value.thinking === true,
     timeout: Number.isInteger(value.timeout) && value.timeout >= 15 && value.timeout <= 600 ? value.timeout : 120,
     rate: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(value.rate) ? value.rate : 1,
     unlock: value.unlock === true,
     autoSubmit: value.autoSubmit === true
   };
+}
+function checkAccess(cfg) {
+  if (!cfg.base) throw Error('请填写 HTTPS 接口地址，本机服务也可使用 HTTP。');
+  if (!cfg.apiKey && !loopback(new URL(cfg.base).hostname)) throw Error('请先在设置中填写' + providers[cfg.provider].name + '的 API Key。');
 }
 function duration(seconds) {
   const n = Math.max(0, Math.ceil(Number(seconds) || 0));
@@ -82,23 +109,28 @@ function requester(transport, settings) {
   return function request(path, data, signal) {
     if (!['/models', '/chat/completions'].includes(path)) return Promise.reject(Error('不支持的 API 路径。'));
     const cfg = config(settings());
-    if (!cfg.apiKey) return Promise.reject(Error('请先在设置中填写 DeepSeek API Key。'));
+    try { checkAccess(cfg); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
-      let handle, finished = false;
+      let handle, deadline, finished = false;
       const abortError = () => Object.assign(Error('操作已取消。'), { name: 'AbortError' });
       function finish(error, result) {
         if (finished) return; finished = true;
+        clearTimeout(deadline);
         signal?.removeEventListener('abort', abort);
         error ? reject(error) : resolve(result);
       }
       function abort() { finish(abortError()); handle?.abort?.(); }
       if (signal?.aborted) { finish(abortError()); return; }
       signal?.addEventListener('abort', abort, { once: true });
+      deadline = setTimeout(() => {
+        finish(Error('请求超时，请稍后重试。'));
+        handle?.abort?.();
+      }, cfg.timeout * 1000);
       try {
         handle = transport({
-          method: data ? 'POST' : 'GET', url: 'https://api.deepseek.com' + path,
-          headers: { Authorization: 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' },
-          anonymous: true, timeout: cfg.timeout * 1000,
+          method: data ? 'POST' : 'GET', url: cfg.base + path,
+          headers: { ...(cfg.apiKey ? { Authorization: 'Bearer ' + cfg.apiKey } : {}), 'Content-Type': 'application/json' },
+          anonymous: true, redirect: 'error', timeout: cfg.timeout * 1000,
           ...(data ? { data: JSON.stringify(data) } : {}),
           onload: response => {
             if (response.status < 200 || response.status >= 300) {
@@ -118,13 +150,19 @@ function requester(transport, settings) {
   };
 }
 async function complete(request, cfg, messages, signal, json = false) {
-  const payload = { model: cfg.model, messages, stream: false, thinking: { type: cfg.thinking ? 'enabled' : 'disabled' } };
-  if (json) payload.response_format = { type: 'json_object' };
+  if (!validModel(cfg.model)) throw Error('请先在设置中填写模型名称。');
+  const payload = { model: cfg.model, messages, stream: false };
+  if (cfg.provider === 'deepseek') {
+    payload.thinking = { type: cfg.thinking ? 'enabled' : 'disabled' };
+    if (json) payload.response_format = { type: 'json_object' };
+  }
   const response = await request('/chat/completions', payload, signal);
   const choice = response.choices?.[0];
   if (choice?.finish_reason === 'length') throw Error('回答被截断，请缩短问题后重试。');
   if (choice?.finish_reason && choice.finish_reason !== 'stop') throw Error('服务未正常完成回答，请重试。');
-  if (typeof choice?.message?.content !== 'string' || !choice.message.content.trim()) throw Error('没有收到有效回答。');
-  return choice.message.content;
+  const content = choice?.message?.content;
+  const text = Array.isArray(content) ? content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('') : content;
+  if (typeof text !== 'string' || !text.trim()) throw Error('没有收到有效回答。');
+  return text;
 }
-module.exports = { defaults, config, duration, normalize, RefreshTimer, parseAnswer, requester, complete };
+module.exports = { defaults, providers, validModel, customBase, checkAccess, config, duration, normalize, RefreshTimer, parseAnswer, requester, complete };

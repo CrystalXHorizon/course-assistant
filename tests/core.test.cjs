@@ -71,10 +71,39 @@ test('navigation handoff preserves the platform fragment and course identity',()
   assert.equal(Q.identify(restored.url.href),'zhs:shared:abc');
   assert.equal(Q.readHandoff(original),null);
 });
-test('API requests use only the official endpoint and never include credentials in the body',async()=>{
+test('legacy settings use the DeepSeek endpoint and never include credentials in the body',async()=>{
   let captured;const request=C.requester(options=>{captured=options;options.onload({status:200,responseText:'{"data":[]}'});},()=>({apiKey:'test-only-key'}));
   await request('/models');assert.equal(captured.url,'https://api.deepseek.com/models');assert.equal(captured.headers.Authorization,'Bearer test-only-key');assert.equal(captured.anonymous,true);assert.equal(captured.data,undefined);
   await assert.rejects(request('https://other.example'),/不支持/);
+});
+test('each AI preset routes model discovery and completion to its configured service',async()=>{
+  for (const [provider,preset] of Object.entries(C.providers)) {
+    const local=provider==='ollama';
+    const cfg=C.config({provider,base:'https://gateway.example/api/v1',model:'org/model:tag',apiKey:local?'':'example-key',thinking:true});
+    const calls=[];
+    const request=C.requester(options=>{
+      calls.push(options);
+      options.onload({status:200,responseText:JSON.stringify({choices:[{message:{content:[{type:'text',text:'{"answers":["A"]}'}]}}]})});
+    },()=>cfg);
+    await request('/models');
+    assert.deepEqual(C.parseAnswer(await C.complete(request,cfg,[],undefined,true),{kind:'single',options:['first']}).indices,[0]);
+    const base=provider==='custom'?'https://gateway.example/api/v1':preset.base;
+    assert.deepEqual(calls.map(c=>c.url),[base+'/models',base+'/chat/completions']);
+    assert.equal(calls[1].headers.Authorization,local?undefined:'Bearer example-key');
+    assert.equal(calls[1].redirect,'error');
+    const payload=JSON.parse(calls[1].data);
+    assert.equal(payload.model,'org/model:tag');
+    assert.equal('thinking' in payload,provider==='deepseek');
+    assert.equal('response_format' in payload,provider==='deepseek');
+  }
+});
+test('custom addresses normalize pasted endpoints and reject unsafe destinations before sending',async()=>{
+  assert.equal(C.customBase('https://gateway.example/api/v1/chat/completions/'),'https://gateway.example/api/v1');
+  assert.equal(C.customBase('http://[::1]:1234/v1/models'),'http://[::1]:1234/v1');
+  for(const base of ['http://localhost.example/v1','https://x:y@example.com','https://example.com/v1?token=x','file:///v1','invalid']){
+    await assert.rejects(C.requester(()=>assert.fail('unexpected request'),()=>({provider:'custom',base,apiKey:'k'}))('/models'),/地址/);
+  }
+  assert.equal(C.config({provider:'unknown',apiKey:'legacy',base:'https://example.com'}).apiKey,'');
 });
 test('missing key fails before transport, and error bodies never leak secrets',async()=>{
   let calls=0;await assert.rejects(C.requester(()=>calls++,()=>({}))('/models'),/API Key/);assert.equal(calls,0);

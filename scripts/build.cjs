@@ -7,7 +7,7 @@ const metadata = `// ==UserScript==
 // @name         课程助手
 // @namespace    https://github.com/CrystalXHorizon/course-assistant
 // @version      ${version}
-// @description  独立实现的课程队列、视频控制、题目与 DeepSeek 辅助、定时刷新工具。所有任务手动启动。
+// @description  课程队列、视频控制、题目辅助、可切换服务商的 AI 对话与定时刷新。
 // @author       CrystalXHorizon
 // @license      MIT
 // @homepageURL  https://github.com/CrystalXHorizon/course-assistant
@@ -18,7 +18,14 @@ const metadata = `// ==UserScript==
 // @match        *://*.xuexi365.com/*
 // @match        *://*.zhihuishu.com/*
 // @connect      api.deepseek.com
+// @connect      dashscope.aliyuncs.com
+// @connect      api.siliconflow.cn
+// @connect      api.openai.com
+// @connect      generativelanguage.googleapis.com
+// @connect      openrouter.ai
+// @connect      localhost
 // @connect      chaoxing.com
+// @connect      *
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_getTab

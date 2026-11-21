@@ -3,6 +3,10 @@ if (window.top !== window.self || document.getElementById('course-assistant-root
 const STORE = 'course-assistant.v1.';
 function read(key, fallback) { try { return GM_getValue(STORE + key, fallback); } catch { return fallback; } }
 function write(key, value) { GM_setValue(STORE + key, value); }
+function savePreference(key, value) {
+  write('settings', {...read('settings', {}), [key]:value});
+  settings[key]=value;
+}
 function sessionRead(key, fallback) { try { return JSON.parse(sessionStorage.getItem(STORE + key)) ?? fallback; } catch { return fallback; } }
 function sessionWrite(key, value) { sessionStorage.setItem(STORE + key, JSON.stringify(value)); }
 let settings = Core.config(read('settings', {}));
@@ -74,7 +78,7 @@ root.append(element('div',{id:'window',class:'window'},[
   element('nav',{'aria-label':'功能导航'},tabs.map(([key,label,icon])=>button(label,()=>activate(key),{'data-tab':key,'aria-pressed':String(key==='overview'),class:'nav-button',title:label}))),
   element('main',{id:'main'}),
   element('footer',{},[element('span',{id:'footer-status',text:'就绪'}),element('span',{text:'v' + VERSION + ' · MIT'})]),
-  element('div',{id:'notice',role:'status','aria-live':'polite',text:'首次使用请先配置 DeepSeek；其他工具可独立使用。'})
+  element('div',{id:'notice',role:'status','aria-live':'polite',text:'使用 AI 对话或答题前，请先在设置中选择 AI 服务。'})
 ]));
 root.append(button('课',()=>fold(false),{id:'launcher',class:'launcher',hidden:true,'aria-label':'展开课程助手'}));
 const main = $('main');
@@ -85,10 +89,10 @@ main.append(panel('overview',[
   hint('课程、题目、AI 与刷新，集中在一个轻量面板里。'),
   element('div',{class:'status-card'},[element('span',{class:'dot'}),element('span',{id:'key-status'})]),
   element('div',{class:'cards'},[
-    ['queue','课程队列','从平台课程列表点选','☷'],['questions','题目辅助','扫描、分析与核对','✓'],['refresh','定时刷新','间隔、次数与倒计时','↻'],['chat','AI 对话','DeepSeek 官方 API','✦']
+    ['queue','课程队列','从平台课程列表点选','☷'],['questions','题目辅助','扫描、分析与核对','✓'],['refresh','定时刷新','间隔、次数与倒计时','↻'],['chat','AI 对话','使用已选服务和模型','✦']
   ].map(([tab,name,desc,icon])=>element('button',{class:'card',onclick:()=>activate(tab)},[element('span',{class:'card-icon',text:icon}),element('strong',{text:name}),element('small',{text:desc})]))),
   element('div',{class:'note'},[element('strong',{text:'从当前页面开始'}),hint('所有任务由你手动启动。先保存未提交的输入，再开启定时刷新。')]),
-  row(button('配置 DeepSeek',()=>activate('settings'),{class:'link'}),button('查看记录',()=>activate('logs'),{class:'link'}))
+  row(button('配置 AI 服务',()=>activate('settings'),{class:'link'}),button('查看记录',()=>activate('logs'),{class:'link'}))
 ]));
 
 // Refresh controls
@@ -115,7 +119,7 @@ function updateTimer() {
 main.append(panel('video',[
   title('视频控制','控制当前页与可访问同源框架中的视频，不修改课程完成记录。'),
   row(button('重新检测',renderVideos),button('播放全部',async()=>{for(const v of videos())await play(v);}),button('暂停全部',()=>videos().forEach(v=>v.pause()))),
-  field('播放速度',element('select',{id:'rate',onchange:event=>{settings.rate=Number(event.target.value);write('settings',settings);for(const v of videos())v.playbackRate=settings.rate;}},[0.5,0.75,1,1.25,1.5,2].map(rate=>element('option',{value:rate,text:`${rate}×` })))),
+  field('播放速度',element('select',{id:'rate',onchange:event=>{savePreference('rate',Number(event.target.value));for(const v of videos())v.playbackRate=settings.rate;}},[0.5,0.75,1,1.25,1.5,2].map(rate=>element('option',{value:rate,text:`${rate}×` })))),
   element('label',{class:'check'},[element('input',{id:'repeat',type:'checkbox',onchange:event=>{repeatVideo=event.target.checked;if(repeatVideo)stopQueue();}}),'当前视频循环重播']),
   element('div',{id:'videos',class:'stack'}),
   hint('跨域播放器、非 HTML5 播放器和浏览器自动播放限制可能无法控制。页面恢复后，循环开关默认关闭。')
@@ -177,7 +181,7 @@ main.append(panel('questions',[
   row(button('扫描本页',scanQuestions,{id:'scan'}),button('分析全部',analyzeAll,{class:'primary',id:'analyze-all'}),button('停止分析',()=>{if(queueQuiz) courseQueue.stop('已停止自动答题。');busyAnswer?.abort();},{id:'answer-stop',disabled:true})),
   element('label',{class:'check'},[element('input',{id:'autofill',type:'checkbox'}),'分析后填入已匹配的答案']),
   element('label',{class:'check'},[element('input',{id:'auto-submit',type:'checkbox',checked:settings.autoSubmit,onchange:e=>{
-    settings.autoSubmit=e.target.checked;write('settings',settings);
+    savePreference('autoSubmit',e.target.checked);
     if (!settings.autoSubmit) { cancelQueueQuiz(); busyAnswer?.abort(); }
   }}),'自动填入并提交章节测验（运行队列时自动答题）']),
   field('搜索已扫描题目',element('input',{id:'question-search',type:'search',placeholder:'输入题目关键词',oninput:renderQuestions})),
@@ -219,7 +223,7 @@ function renderQuestions(){
 }
 async function analyzeAll(selected=questions.filter(q=>!q.unresolved), job=null){
   if(busyAnswer)return;if(!selected.length)throw Error('请先扫描题目。');
-  if(!settings.apiKey)throw Error('请先配置 DeepSeek API Key。');
+  Core.checkAccess(settings);
   const controller=job?.controller || new AbortController();
   const token=generation, originalURL=location.href;
   function check(){
@@ -324,20 +328,20 @@ function processQueueQuiz(docs,valid,onError){
 
 // Chat is kept in memory only, avoiding accidental durable storage of conversations.
 main.append(panel('chat',[
-  title('AI 对话','使用你的 DeepSeek API Key；对话仅保留在当前页面内。'),
+  title('AI 对话','对话保留在当前页面，切换服务后开始新对话。'),
   element('div',{id:'chat-list',class:'chat-list'},[hint('把问题写在下面，也可以粘贴题目寻求解释。')]),
   field('你的问题',element('textarea',{id:'chat-input',rows:4,maxlength:20000,placeholder:'例如：帮我解释这道题的思路…'})),
   row(button('发送',sendChat,{class:'primary',id:'chat-send'}),button('停止',()=>busyChat?.abort(),{id:'chat-stop',disabled:true}),button('清空',()=>{if(busyChat)throw Error('请先停止当前回答。');chat=[];renderChat();},{id:'chat-clear'}))
 ]));
 function renderChat(){
-  $('chat-list').replaceChildren(...(chat.length?chat.map(message=>element('div',{class:'message '+message.role},[element('small',{text:message.role==='user'?'你':'DeepSeek'}),element('div',{text:message.content})])):[hint('当前没有对话。')]));
+  $('chat-list').replaceChildren(...(chat.length?chat.map(message=>element('div',{class:'message '+message.role},[element('small',{text:message.role==='user'?'你':Core.providers[settings.provider].name}),element('div',{text:message.content})])):[hint('当前没有对话。')]));
   $('chat-send').disabled=Boolean(busyChat);$('chat-stop').disabled=!busyChat;$('chat-clear').disabled=Boolean(busyChat);
   $('chat-list').scrollTop=$('chat-list').scrollHeight;
 }
 async function sendChat(){
-  if(busyChat)return;const text=$('chat-input').value.trim();if(!text)throw Error('请先输入问题。');if(!settings.apiKey)throw Error('请先配置 DeepSeek API Key。');
+  if(busyChat)return;const text=$('chat-input').value.trim();if(!text)throw Error('请先输入问题。');Core.checkAccess(settings);
   const controller=new AbortController();busyChat=controller;
-  const turn={role:'user',content:text};chat.push(turn);$('chat-input').value='';renderChat();notice('正在等待 DeepSeek 回答…');
+  const turn={role:'user',content:text};chat.push(turn);$('chat-input').value='';renderChat();notice(`正在等待 ${Core.providers[settings.provider].name} 回答…`);
   try{
     const reply=await Core.complete(request,settings,[{role:'system',content:'你是学习辅导助手。使用简体中文清楚地解释概念与步骤，指出不确定性。'},...chat.slice(-19)],controller.signal);
     if(!controller.signal.aborted)chat.push({role:'assistant',content:reply});
@@ -346,44 +350,110 @@ async function sendChat(){
   finally{if(busyChat===controller)busyChat=null;renderChat();}
 }
 
+function profileOf(cfg) {
+  const {base, model, apiKey, thinking} = cfg;
+  return {base, model, apiKey, thinking};
+}
+function savedService(provider, stored=read('settings',{})) {
+  const active=Core.config(stored);
+  return active.provider===provider ? active : Core.config({...stored.profiles?.[provider], provider});
+}
+function selectedBase() {
+  const provider=$('provider').value;
+  return provider==='custom' ? Core.customBase($('api-base').value) : Core.providers[provider].base;
+}
+function showKeyHint() {
+  const saved=savedService($('provider').value);
+  const base=selectedBase();
+  $('api-key').placeholder=base && base===saved.base && saved.apiKey ? '已保存；留空保留原密钥' : '填写 API Key（本机服务可留空）';
+}
+function showService() {
+  const provider=$('provider').value;
+  const saved=savedService(provider);
+  $('api-base').parentElement.hidden=provider!=='custom';
+  $('api-base').value=saved.base;
+  $('api-key').previousElementSibling.textContent=Core.providers[provider].name+' API Key';
+  $('api-key').value='';
+  $('model').value=saved.model;
+  const suggestions=new Set([saved.model,Core.providers[provider].model]);
+  if(provider==='deepseek') suggestions.add('deepseek-v4-pro');
+  $('model-list').replaceChildren(...Array.from(suggestions).filter(Boolean).map(value=>element('option',{value})));
+  $('thinking').checked=saved.thinking;
+  $('thinking').parentElement.hidden=provider!=='deepseek';
+  $('deepseek-keys').hidden=provider!=='deepseek';
+  showKeyHint();
+}
 main.append(panel('settings',[
-  title('设置','密钥只保存在脚本管理器中，仅发送给 DeepSeek 官方 API。'),
-  field('DeepSeek API Key',element('input',{id:'api-key',type:'password',autocomplete:'off',placeholder:settings.apiKey?'已保存；留空保留原密钥':'填写自己的 API Key'})),
-  field('模型名称',element('input',{id:'model',list:'model-list',value:settings.model})),
-  element('datalist',{id:'model-list'},['deepseek-flash','deepseek-v4-pro'].map(model=>element('option',{value:model}))),
-  element('label',{class:'check'},[element('input',{id:'thinking',type:'checkbox',checked:settings.thinking}),'开启深度思考']),
+  title('设置','AI 对话、题目分析和课程队列使用同一项服务。'),
+  field('AI 服务商',element('select',{id:'provider',onchange:showService},
+    Object.entries(Core.providers).map(([id,provider])=>element('option',{value:id,text:provider.name})))),
+  field('接口地址（Base URL）',element('input',{id:'api-base',type:'url',placeholder:'https://example.com/v1',oninput:()=>{
+    $('api-key').value='';$('model-list').replaceChildren();showKeyHint();
+  }})),
+  field('API Key',element('input',{id:'api-key',type:'password',autocomplete:'off'})),
+  field('模型名称',element('input',{id:'model',list:'model-list',placeholder:'输入模型 ID，或先获取模型列表'})),
+  element('datalist',{id:'model-list'}),
+  element('label',{class:'check'},[element('input',{id:'thinking',type:'checkbox'}),'开启深度思考']),
   field('API 超时（秒）',element('input',{id:'timeout',type:'number',min:15,max:600,value:settings.timeout})),
   element('label',{class:'check'},[element('input',{id:'unlock',type:'checkbox',checked:settings.unlock}),'允许页面文字选中、复制和粘贴']),
-  row(button('保存设置',saveSettings,{class:'primary'}),button('测试连接 / 获取模型',testModels,{id:'test-models'})),
-  button('清除已保存密钥',()=>{
-    if(busyChat||busyAnswer||busyModels)throw Error('请先停止当前 API 请求。');
-    settings.apiKey='';write('settings',settings);$('api-key').value='';updateKeyStatus();notice('已清除保存的密钥。');
-  },{class:'link'}),
-  element('div',{class:'note',text:'测试连接仅请求模型列表，不发起聊天生成。AI 对话与题目分析按你的 DeepSeek 账户计费。'}),
-  hint('切换新版前请停用旧版脚本。新版使用独立存储，需要重新填写密钥；不会读取旧版设置。'),
-  element('a',{href:'https://platform.deepseek.com/api_keys',target:'_blank',rel:'noopener noreferrer',class:'link',text:'打开 DeepSeek 密钥管理'})
+  row(button('保存设置',()=>saveSettings(),{class:'primary'}),button('测试连接 / 获取模型',testModels,{id:'test-models'})),
+  button('清除已保存密钥',clearKey,{class:'link'}),
+  hint('连接测试会保存设置并读取模型列表。若服务未开放模型列表，可直接填写模型 ID 后保存。'),
+  element('a',{id:'deepseek-keys',href:'https://platform.deepseek.com/api_keys',target:'_blank',rel:'noopener noreferrer',class:'link',text:'打开 DeepSeek 密钥管理'})
 ]));
-function saveSettings(){
-  const timeout=Number($('timeout').value),model=$('model').value.trim();
-  if(!Number.isInteger(timeout)||timeout<15||timeout>600)throw Error('超时必须为 15～600 秒的整数。');
-  if(!/^[\w.-]{1,100}$/.test(model))throw Error('请输入有效的模型名称。');
+$('provider').value=settings.provider;
+showService();
+
+function requireIdle() {
   if(busyChat||busyAnswer||busyModels)throw Error('请先停止当前 API 请求再修改设置。');
-  settings=Core.config({...settings,apiKey:$('api-key').value.trim()||settings.apiKey,model,timeout,thinking:$('thinking').checked,unlock:$('unlock').checked});
-  write('settings',settings);$('api-key').value='';copiedDocuments.set(settings.unlock);updateKeyStatus();notice('设置已保存。');
+}
+function clearKey() {
+  requireIdle();
+  const provider=$('provider').value, stored=read('settings',{}), saved=savedService(provider,stored);
+  if (saved.base!==selectedBase()) throw Error('当前接口地址没有已保存的密钥。');
+  if (Core.config(stored).provider===provider) write('settings',{...stored,apiKey:''});
+  else write('settings',{...stored,profiles:{...stored.profiles,[provider]:{...profileOf(saved),apiKey:''}}});
+  if(settings.provider===provider && settings.base===saved.base) settings.apiKey='';
+  $('api-key').value='';showKeyHint();updateKeyStatus();notice('已清除保存的密钥。');
+}
+function saveSettings(discover=false){
+  requireIdle();
+  const timeout=Number($('timeout').value),model=$('model').value.trim();
+  const provider=$('provider').value, base=selectedBase();
+  if(!base)throw Error('请填写有效的 HTTPS 接口地址，本机服务也可使用 HTTP。');
+  if(!Number.isInteger(timeout)||timeout<15||timeout>600)throw Error('超时必须为 15～600 秒的整数。');
+  if(!(discover && !model) && !Core.validModel(model))throw Error('请输入有效的模型名称。');
+  const stored=read('settings',{}), previous=Core.config(stored), saved=savedService(provider,stored);
+  const apiKey=$('api-key').value.trim() || (base===saved.base ? saved.apiKey : '');
+  const next=Core.config({...previous,provider,base,apiKey,model,timeout,thinking:$('thinking').checked,unlock:$('unlock').checked});
+  if(discover) Core.checkAccess(next);
+  const profiles={...stored.profiles};
+  if(previous.provider!==provider) profiles[previous.provider]=profileOf(previous);
+  delete profiles[provider];
+  write('settings',{...next,profiles});
+  if(settings.provider!==provider || settings.base!==base) chat=[];
+  settings=next;
+  $('api-key').value='';copiedDocuments.set(settings.unlock);showKeyHint();updateKeyStatus();renderChat();notice('设置已保存。');
 }
 function updateKeyStatus(){
-  $('key-status').textContent=settings.apiKey?'DeepSeek 密钥已配置':'DeepSeek 密钥尚未配置';
-  $('api-key').placeholder=settings.apiKey?'已保存；留空保留原密钥':'填写自己的 API Key';
+  const name=Core.providers[settings.provider].name;
+  try { Core.checkAccess(settings); $('key-status').textContent=name+' · '+(settings.model || '请选择模型'); }
+  catch { $('key-status').textContent=name+' · 待配置'; }
 }
 async function testModels(){
-  if(busyModels)return;saveSettings();const controller=new AbortController();busyModels=controller;$('test-models').disabled=true;
+  if(busyModels)return;
+  saveSettings(true);
+  const controller=new AbortController();busyModels=controller;$('test-models').disabled=true;
+  $('provider').disabled=true;$('api-base').disabled=true;
   try{
     const response=await request('/models',null,controller.signal);
-    const ids=(response.data||[]).map(model=>model.id).filter(id=>typeof id==='string'&&/^[\w.-]{1,100}$/.test(id));
-    if(!ids.length)throw Error('连接成功，但未返回可用模型。');
+    const ids=(Array.isArray(response.data)?response.data:[]).map(item=>item?.id).filter(Core.validModel);
+    if(!ids.length)throw Error('服务未返回模型列表。可以手动填写服务商提供的模型 ID。');
     $('model-list').replaceChildren(...ids.map(id=>element('option',{value:id})));
-    notice(ids.includes(settings.model)?'连接成功，当前模型可用。':`连接成功，请选择可用模型：${ids.join('、')}`);log('DeepSeek 模型列表连接成功');
-  }finally{busyModels=null;$('test-models').disabled=false;}
+    if(!$('model').value) $('model').value=ids[0];
+    notice(ids.includes(settings.model)?'连接成功，当前模型可用。':`连接成功，获取到 ${ids.length} 个模型。请在模型名称处选择后保存。`);
+    log(Core.providers[settings.provider].name+'模型列表连接成功');
+  }finally{busyModels=null;$('test-models').disabled=false;$('provider').disabled=false;$('api-base').disabled=false;}
 }
 
 main.append(panel('logs',[

@@ -49,7 +49,7 @@ async function pageFor(t, options = {}){
         if(options.url.endsWith('/models'))response={data:[{id:'deepseek-flash'},{id:'test-model'}]};
         else{
           const data=JSON.parse(options.data);let content=window.__apiReply;
-          if(data.response_format){const q=JSON.parse(data.messages.at(-1).content);content=JSON.stringify({answers:q.type==='multiple'?['A','C']:q.type==='text'?['东']:['B'],explanation:'测试解析'});}
+          if(data.messages[0]?.content.includes('只返回 JSON 对象')){const q=JSON.parse(data.messages.at(-1).content);content=JSON.stringify({answers:q.type==='multiple'?['A','C']:q.type==='text'?['东']:['B'],explanation:'测试解析'});}
           response={choices:[{finish_reason:'stop',message:{content}}]};
         }
         options.onload({status:window.__apiStatus,responseText:JSON.stringify(response)});
@@ -163,6 +163,46 @@ test('stored keys never get repopulated into the page and can be explicitly clea
   assert.match(await page.getByLabel('DeepSeek API Key',{exact:true}).getAttribute('placeholder'),/已保存/);
   await page.getByRole('button',{name:'清除已保存密钥',exact:true}).click();await page.getByRole('button',{name:'测试连接 / 获取模型',exact:true}).click();assert.equal(await page.evaluate(()=>window.__requests.length),0);
 });
+test('a legacy key and model survive switching providers, and prior chat stays with its service',async t=>{
+  const page=await pageFor(t);
+  await page.evaluate(()=>GM_setValue('course-assistant.v1.settings',{apiKey:'legacy-key',model:'legacy-model'}));
+  await page.reload();await page.addScriptTag({content:source});
+  const send=async text=>{
+    await tab(page,'AI');await page.getByLabel('你的问题').fill(text);
+    await page.locator('#chat-send').click();await page.locator('.message.assistant').waitFor();
+  };
+  await send('旧服务对话');
+  await tab(page,'设置');await page.getByLabel('AI 服务商').selectOption('openrouter');
+  await page.locator('#test-models').click();
+  assert.equal(await page.evaluate(()=>__requests.length),1);
+  await page.getByLabel('OpenRouter API Key').fill('router-key');
+  await page.getByLabel('模型名称').fill('vendor/model:free');
+  await page.getByRole('button',{name:'保存设置'}).click();
+  await send('新服务对话');
+  const calls=await page.evaluate(()=>__requests);
+  assert.equal(calls[0].headers.Authorization,'Bearer legacy-key');
+  assert.equal(calls[1].url,'https://openrouter.ai/api/v1/chat/completions');
+  assert.equal(calls[1].headers.Authorization,'Bearer router-key');
+  assert.equal(JSON.parse(calls[1].data).model,'vendor/model:free');
+  assert.ok(!calls[1].data.includes('旧服务对话'));
+  await tab(page,'设置');await page.getByLabel('AI 服务商').selectOption('deepseek');
+  assert.equal(await page.getByLabel('模型名称').inputValue(),'legacy-model');
+  await page.locator('#test-models').click();
+  assert.equal(await page.evaluate(()=>__requests.at(-1).headers.Authorization),'Bearer legacy-key');
+});
+test('changing a custom endpoint requires its own key and supports discovery with a blank model',async t=>{
+  const page=await pageFor(t);await tab(page,'设置');
+  await page.getByLabel('AI 服务商').selectOption('custom');
+  await page.locator('#api-base').fill('https://first.example/v1/chat/completions');
+  await page.locator('#api-key').fill('first-key');await page.locator('#test-models').click();
+  await page.waitForFunction(()=>document.querySelector('#course-assistant-root').shadowRoot.querySelector('#model').value==='deepseek-flash');
+  await page.locator('#api-base').fill('https://second.example/v1');
+  await page.locator('#test-models').click();
+  assert.deepEqual(await page.evaluate(()=>__requests.map(r=>r.url)),['https://first.example/v1/models']);
+  await page.locator('#api-key').fill('second-key');await page.locator('#test-models').click();
+  const last=await page.evaluate(()=>__requests.at(-1));
+  assert.equal(last.url,'https://second.example/v1/models');assert.equal(last.headers.Authorization,'Bearer second-key');
+});
 test('refresh presets, cross-panel persistence, navigation pause and reload limit',async t=>{
   const page=await pageFor(t);await tab(page,'刷新');await page.getByRole('button',{name:'30 秒',exact:true}).click();assert.equal(await page.getByLabel('刷新间隔（秒）').inputValue(),'30');
   await page.getByRole('button',{name:'开始刷新',exact:true}).click();await tab(page,'AI');await tab(page,'刷新');assert.equal(await page.getByRole('button',{name:'开始刷新',exact:true}).isDisabled(),true);
@@ -204,7 +244,9 @@ test('one queue start plays video, switches task cards, fills and confirms the q
         await original();sessionStorage.setItem('played','yes');setTimeout(()=>{v.pause();Object.defineProperty(v,'ended',{value:true});},60);
       };</script>`;
   }});
-  await configure(page);await tab(page,'题目');await page.getByLabel(autoLabel).check();
+  await tab(page,'设置');await page.getByLabel('AI 服务商').selectOption('ollama');
+  await page.getByRole('button',{name:'保存设置'}).click();
+  await tab(page,'题目');await page.getByLabel(autoLabel).check();
   await readCatalog(page);await page.getByRole('button',{name:/第一门/}).click();await page.getByRole('button',{name:/第二门/}).click();
   await page.getByRole('button',{name:'开始学习',exact:true}).click();
   await page.waitForURL(/courseid=11/);await page.addScriptTag({content:source});
