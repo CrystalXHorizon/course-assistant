@@ -107,7 +107,7 @@ test('a per-frame font decodes stem and option text once, preserves plain siblin
   await page.getByRole('button',{name:'扫描本页'}).click();
   assert.equal(await page.locator('.question p').textContent(),'盐会：玢');
   assert.deepEqual(await page.locator('.question .option').allTextContents(),['A. 盐','B. 会','C. 清水']);
-  await page.getByText('分析后填入已匹配的答案（不提交）',{exact:true}).click();
+  await page.getByText('分析后填入已匹配的答案',{exact:true}).click();
   await page.getByRole('button',{name:'分析全部'}).click();
   await page.locator('.question .answer').waitFor();
   const payload=await page.evaluate(()=>JSON.parse(JSON.parse(window.__requests[0].data).messages.at(-1).content));
@@ -124,7 +124,7 @@ test('a per-frame font decodes stem and option text once, preserves plain siblin
 
 test('AI analysis fills native answers, corrects wrong checks, and does not submit a form',async t=>{
   const page=await pageFor(t);await configure(page);await tab(page,'题目');await page.getByRole('button',{name:'扫描本页',exact:true}).click();
-  await page.getByText('分析后填入已匹配的答案（不提交）',{exact:true}).click();await page.getByRole('button',{name:'分析全部',exact:true}).click();
+  await page.getByText('分析后填入已匹配的答案',{exact:true}).click();await page.getByRole('button',{name:'分析全部',exact:true}).click();
   await page.waitForFunction(()=>document.getElementById('course-assistant-root').shadowRoot.getElementById('notice').textContent.includes('分析结束'));
   assert.equal(await page.locator('#single input[value="2"]').isChecked(),true);
   assert.equal(await page.locator('#multi input[value="3"]').isChecked(),false);assert.equal(await page.locator('#multi input[value="4"]').isChecked(),true);
@@ -142,7 +142,7 @@ test('stale question text is rejected before filling',async t=>{
 });
 test('stopping analysis prevents a delayed response from filling the page',async t=>{
   const page=await pageFor(t);await configure(page);await page.evaluate(()=>window.__delay=10000);await tab(page,'题目');await page.getByRole('button',{name:'扫描本页',exact:true}).click();
-  await page.getByText('分析后填入已匹配的答案（不提交）',{exact:true}).click();await page.getByRole('button',{name:'分析全部',exact:true}).click();await page.getByRole('button',{name:'停止分析',exact:true}).click();
+  await page.getByText('分析后填入已匹配的答案',{exact:true}).click();await page.getByRole('button',{name:'分析全部',exact:true}).click();await page.getByRole('button',{name:'停止分析',exact:true}).click();
   assert.equal(await page.locator('#single input[value="2"]').isChecked(),false);assert.equal(await page.evaluate(()=>window.__aborts),1);
 });
 test('chat renders untrusted model output as plain text and cancellation allows retry',async t=>{
@@ -169,8 +169,77 @@ test('refresh presets, cross-panel persistence, navigation pause and reload limi
   await page.evaluate(()=>history.pushState({},'', '/changed'));await page.waitForFunction(()=>document.getElementById('course-assistant-root').shadowRoot.getElementById('refresh-start').disabled===false);
   await page.getByLabel('刷新间隔（秒）').fill('10');await page.getByLabel('次数上限（0 为不限）').fill('1');await page.getByRole('button',{name:'开始刷新',exact:true}).click();
   await Promise.all([page.waitForEvent('load'),page.clock.setFixedTime(new Date(Date.now()+20000))]);
-  await page.addScriptTag({content:source});await page.getByRole('navigation').waitFor();await tab(page,'刷新');
+  await page.addScriptTag({content:source});await page.getByRole('navigation').waitFor();assert.equal(await page.getByRole('navigation').getByRole('button',{name:'刷新',exact:true}).getAttribute('aria-pressed'),'true');
   assert.equal(await page.getByRole('button',{name:'开始刷新',exact:true}).isEnabled(),true);assert.match(await page.locator('#refresh-count').textContent(),/1/);
+});
+const quizPath = '/mooc-ans/work/doHomeWorkNew?workAnswerId=51&courseId=11';
+const autoLabel = '自动填入并提交章节测验（运行队列时自动答题）';
+function assignment(total = 1) {
+  return `<div class="ceyan_name">题量：${total}</div><div class="testTit_status">待完成</div>
+    <form id="form1"><fieldset class="TiMu"><legend>选择第二项</legend>
+    <label><input type="radio" name="a">甲</label><label><input type="radio" name="a">乙</label>
+    </fieldset></form><div class="ZY_sub"><button class="btnSubmit" onclick="parent.document.querySelector('#workpop').hidden=false">提交</button></div>`;
+}
+function confirmation() {
+  return `<div hidden id="workpop"><p id="popcontent">确认提交？</p><button id="popok" onclick="
+    const d=document.querySelector('iframe').contentDocument;
+    if (!d.querySelectorAll('input')[1].checked) throw Error('unchecked');
+    d.querySelector('.testTit_status').textContent='已提交';
+    document.querySelector('#workpop').hidden=true;
+    sessionStorage.setItem('submits',String(Number(sessionStorage.getItem('submits'))+1));
+    const chapter=document.querySelector('[data-course-chapter]'); if(chapter) chapter.dataset.chapterStatus='complete';
+  ">提交</button></div>`;
+}
+test('one queue start plays video, switches task cards, fills and confirms the quiz once, then finishes the next course',async t=>{
+  const first='/mycourse/studentstudy?courseid=11&clazzid=90',second='/mycourse/studentstudy?courseid=22&clazzid=91';
+  const page=await pageFor(t,{fixture:url=>{
+    if(url.pathname==='/demo')return `<a href="${first}">第一门</a><a href="${second}">第二门</a>`;
+    if(url.pathname.endsWith('doHomeWorkNew'))return assignment();
+    if(url.searchParams.get('courseid')==='22')return '<div data-course-chapter data-current="true" data-chapter-status="complete">完成</div>';
+    return `<div data-course-chapter data-current="true" data-chapter-status="pending">章节</div>
+      <div id="prev_tab"><ul class="prev_ul"><li class="active" cardid="1">视频</li>
+      <li cardid="2" onclick="document.querySelector('video').remove();this.previousElementSibling.className='';this.className='active';document.querySelector('iframe').src='${quizPath}'">测验</li></ul></div>
+      <video></video><iframe></iframe>`+confirmation()+`<script>
+      const v=document.querySelector('video');const original=v.play.bind(v);v.play=async()=>{
+        await original();sessionStorage.setItem('played','yes');setTimeout(()=>{v.pause();Object.defineProperty(v,'ended',{value:true});},60);
+      };</script>`;
+  }});
+  await configure(page);await tab(page,'题目');await page.getByLabel(autoLabel).check();
+  await readCatalog(page);await page.getByRole('button',{name:/第一门/}).click();await page.getByRole('button',{name:/第二门/}).click();
+  await page.getByRole('button',{name:'开始学习',exact:true}).click();
+  await page.waitForURL(/courseid=11/);await page.addScriptTag({content:source});
+  await page.waitForURL(/courseid=22/,{timeout:18000});await page.addScriptTag({content:source});
+  await page.getByText('本轮队列已结束',{exact:true}).waitFor({timeout:8000});
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('played')),'yes');
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('submits')),'1');
+});
+test('auto submission rejects incomplete scans and only confirms a fully filled quiz once',async t=>{
+  const page=await pageFor(t,{fixture:url=>url.pathname.endsWith('doHomeWorkNew')?assignment(2):'<iframe src="'+quizPath+'"></iframe>'+confirmation()});
+  await configure(page);await tab(page,'题目');await page.getByLabel(autoLabel).check();
+  await page.getByRole('button',{name:'扫描本页'}).click();await page.getByRole('button',{name:'分析全部'}).click();
+  assert.match(await notice(page).textContent(),/题量/);assert.equal(await page.evaluate(()=>window.__requests.length),0);
+  await page.frameLocator('iframe').locator('.ceyan_name').evaluate(el=>el.textContent='题量：1');
+  await page.getByRole('button',{name:'分析全部'}).click();
+  await page.waitForFunction(()=>sessionStorage.getItem('submits')==='1');
+  assert.equal(await page.evaluate(()=>window.__requests.length),1);
+  await page.reload();await page.addScriptTag({content:source});await tab(page,'题目');
+  await page.getByRole('button',{name:'扫描本页'}).click();
+  await page.frameLocator('iframe').locator('.ceyan_name').evaluate(el=>el.textContent='题量：1');
+  await page.getByRole('button',{name:'分析全部'}).click();assert.match(await notice(page).textContent(),/已发起过提交/);
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('submits')),'1');
+});
+test('pausing a running queue cancels its pending answer and leaves the quiz unsubmitted',async t=>{
+  const url='https://mooc1.chaoxing.com/mycourse/studentstudy?courseid=11&clazzid=90';
+  const page=await pageFor(t,{url,fixture:u=>u.pathname.endsWith('doHomeWorkNew')?assignment():
+    '<a href="'+url+'">测试课程</a><iframe src="'+quizPath+'"></iframe>'+confirmation()});
+  await configure(page);await tab(page,'题目');await page.getByLabel(autoLabel).check();
+  await page.evaluate(()=>window.__delay=10000);
+  await readCatalog(page);await page.getByRole('button',{name:/测试课程/}).click();await page.getByRole('button',{name:'开始学习'}).click();
+  await page.waitForFunction(()=>window.__requests.length===1);
+  await page.getByRole('button',{name:'暂停队列'}).click();
+  await page.waitForFunction(()=>window.__aborts===1);
+  assert.equal(await page.frameLocator('iframe').locator('input:checked').count(),0);
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('submits')),null);
 });
 const queueFixture = url => {
   if (url.pathname === '/demo') return `<!doctype html><title>我的课程</title>

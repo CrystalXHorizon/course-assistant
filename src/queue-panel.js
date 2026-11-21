@@ -1,4 +1,4 @@
-function createQueuePanel({ element, button, hint, field, row, title, notice, log, read, write, sessionRead, sessionWrite, refresh, media, play, beforeStart, safeAction }) {
+function createQueuePanel({ element, button, hint, field, row, title, notice, log, read, write, sessionRead, sessionWrite, refresh, media, play, beforeStart, safeAction, processQuiz, cancelQuiz }) {
   const platform = Queue.site(location.href)?.platform;
   const key = `course-queue.${platform}`;
   const ownerKey = 'course-queue-owner';
@@ -80,7 +80,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     row(selectionCount, clearSelection, startButton)
   );
   running.append(row(runStatus, current), progress, summary, row(pauseButton, continueButton, skipButton, resetButton), items);
-  const view = element('div', {}, [title('课程队列', '按点选顺序排队学习，查看当前课程和完成情况。'), listing, running]);
+  const view = element('div', {}, [title('课程队列', '按点选顺序播放课程。学习通章节测验可在「题目」开启自动答题和提交。'), listing, running]);
 
   function localCourses() {
     const found = new Map();
@@ -226,6 +226,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
   function stop(message = '课程队列已暂停。') {
     sync();
     if (!isOwner()) return;
+    cancelQuiz();
     runGeneration++;
     Queue.pause(queue);
     const item = Queue.currentCourse(queue);
@@ -286,6 +287,7 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
   function finish(status, reason) {
     sync();
     if (!isOwner() && !(status === 'skipped' && !isLive() && Queue.currentCourse(queue))) return;
+    cancelQuiz();
     const name = Queue.currentCourse(queue)?.title;
     const advancing = isOwner();
     for (const player of media()) player.pause();
@@ -345,28 +347,51 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
     let homeRows = directoryRows;
     if (!homeRows.length && Queue.isChaoxingHome(location.href)) homeRows = Queue.catalog(docs, PageDOM.visible, true);
     const chapters = homeRows.length ? homeRows : Queue.catalog(docs, PageDOM.visible);
+    const chapter = !homeRows.length && chapters.find(chapter => chapter.active);
+    if (chapter && activeChapter !== chapter.control) {
+      if (activeChapter) cancelQuiz();
+      activeChapter = chapter.control;
+      entryTime = now;
+      switched = null;
+    }
+    if (!homeRows.length && platform === 'chaoxing') {
+      const generation = runGeneration, url = location.href, chapterId = document.querySelector('#curChapterId')?.value;
+      const valid = () => {
+        sync();
+        return isOwner() && isLive() && runGeneration === generation && location.href === url &&
+          Queue.currentCourse(queue)?.id === item.id && document.querySelector('#curChapterId')?.value === chapterId;
+      };
+      if (processQuiz(docs,valid,reason=>stop(reason))) { entryTime = now; return; }
+    }
     if (chapters.length && chapters.every(chapter => chapter.status === 'done')) {
       confirmedCompleteAt ||= now;
       if (now - confirmedCompleteAt > 1800) finish('done', '平台章节均显示已完成');
       return;
     }
     confirmedCompleteAt = 0;
-    const chapter = !homeRows.length && chapters.find(chapter => chapter.active);
-    if (chapter && activeChapter !== chapter.control) {
-      activeChapter = chapter.control;
-      entryTime = now;
-      switched = null;
-    }
     const players = homeRows.length ? [] : media();
     for (const player of players) {
       if (player.ended || !player.paused || (attempted.get(player) || 0) > now - 4500) continue;
       if (chapter?.status === 'done') break;
       attempted.set(player, now);
-      try { await play(player); } catch { notice('请手动播放当前章节。队列会继续检查平台进度。'); }
+      try { await play(player,true); } catch { notice('请手动播放当前章节。队列会继续检查平台进度。'); }
       sync();
       if (!isOwner()) { player.pause(); return; }
     }
     const playing = players.some(player => !player.paused && !player.ended);
+    if (chapter?.status === 'pending' && !playing && now - lastSwitch > 3000) {
+      const currentCard = document.querySelector('#prev_tab .prev_ul li.active');
+      const nextCard = currentCard?.nextElementSibling;
+      const points = docs.flatMap(doc => [...doc.querySelectorAll('.ans-job-icon')]);
+      const cardDone = points.length ? points.every(point => point.closest('.ans-job-finished') || point.getAttribute('aria-label') === '任务点已完成')
+        : players.length && players.every(player => player.ended);
+      if (cardDone && nextCard?.matches('li[cardid]') && switched !== nextCard && PageDOM.visible(nextCard)) {
+        switched = nextCard;
+        lastSwitch = entryTime = now;
+        nextCard.click();
+        return;
+      }
+    }
     if ((!playing || chapter?.status === 'done') && (!chapter || chapter.status === 'done') && now - lastSwitch > 2500) {
       const next = chapters.find(chapter => chapter.status === 'pending' && (homeRows.length || !chapter.active))
         || (!chapter && platform === 'chaoxing' && chapters.find(row => row.status === 'unknown' && /\btoOld\(/.test(row.control.getAttribute('onclick') || '')));
@@ -395,6 +420,17 @@ function createQueuePanel({ element, button, hint, field, row, title, notice, lo
       if (nav) { catalogRequested = true; nav.click(); return; }
     }
     if (!playing && now - entryTime > catalogWait && now - lastSwitch > catalogWait) {
+      const gradedWork = docs.find(doc => /\/work\//i.test(new URL(doc.URL).pathname) &&
+        /已完成|已提交|已批阅|待批阅/.test(doc.querySelector('.testTit_status')?.textContent || ''));
+      const chapterId = document.querySelector('#curChapterId')?.value || new URL(location.href).searchParams.get('chapterId');
+      if (chapter?.status === 'pending' && chapterId && gradedWork) {
+        const marker = item.id + '.' + chapterId;
+        if (sessionRead('queue-result-refresh','') !== marker) {
+          sessionWrite('queue-result-refresh',marker);
+          location.reload();
+          return;
+        }
+      }
       const reason = chapters.some(chapter => chapter.status === 'locked') ? '有未解锁的章节，请处理后继续。'
         : chapter?.status === 'pending' ? '平台仍显示本章未完成。请检查测验或其他任务点后继续。'
         : '无法确认章节任务状态，请打开章节目录或处理本门课程后继续。';

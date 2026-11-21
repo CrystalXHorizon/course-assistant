@@ -46,7 +46,7 @@ const modules = [
   'const GLYPH_INDEX = ' + read('src/glyph-index.json') + ';',
   wrap('glyphKey','src/glyph-key.cjs'), wrap('QuestionFont','src/question-font.cjs'),
   wrap('QuestionScan','src/question-scan.cjs'), wrap('Core','src/core.cjs'),
-  wrap('PageDOM','src/dom.cjs'), wrap('Queue','src/course-queue.cjs'),
+  wrap('PageDOM','src/dom.cjs'), wrap('Quiz','src/quiz-submit.cjs'), wrap('Queue','src/course-queue.cjs'),
   'const VERSION = ' + JSON.stringify(version) + ';',
   'const STYLE = ' + JSON.stringify(read('src/style.css')) + ';',
   read('src/queue-panel.js'), read('src/app.js')

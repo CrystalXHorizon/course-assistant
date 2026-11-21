@@ -1,6 +1,6 @@
 'use strict';
 
-const defaults = Object.freeze({ apiKey: '', model: 'deepseek-flash', thinking: false, timeout: 120, rate: 1, unlock: false });
+const defaults = Object.freeze({ apiKey: '', model: 'deepseek-flash', thinking: false, timeout: 120, rate: 1, unlock: false, autoSubmit: false });
 function config(value = {}) {
   return {
     apiKey: typeof value.apiKey === 'string' ? value.apiKey.trim() : '',
@@ -8,7 +8,8 @@ function config(value = {}) {
     thinking: value.thinking === true,
     timeout: Number.isInteger(value.timeout) && value.timeout >= 15 && value.timeout <= 600 ? value.timeout : 120,
     rate: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(value.rate) ? value.rate : 1,
-    unlock: value.unlock === true
+    unlock: value.unlock === true,
+    autoSubmit: value.autoSubmit === true
   };
 }
 function duration(seconds) {
