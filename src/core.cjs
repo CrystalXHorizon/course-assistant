@@ -16,14 +16,6 @@ function duration(seconds) {
   const pad = v => String(v).padStart(2, '0');
   return (n >= 3600 ? pad(Math.floor(n / 3600)) + ':' : '') + pad(Math.floor(n / 60) % 60) + ':' + pad(n % 60);
 }
-function safeURL(value, base) {
-  try {
-    const url = new URL(value, base);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
-    return url;
-  } catch { return null; }
-}
-function canonical(value) { const url = safeURL(value); if (!url) return ''; url.hash = ''; return url.href; }
 
 class RefreshTimer {
   constructor({ read, write, now = Date.now, url, navigation = 'navigate' }) {
@@ -134,10 +126,4 @@ async function complete(request, cfg, messages, signal, json = false) {
   if (typeof choice?.message?.content !== 'string' || !choice.message.content.trim()) throw Error('没有收到有效回答。');
   return choice.message.content;
 }
-function nextQueue(queue) {
-  if (!queue.items.length) return { ...queue, active: false, index: 0 };
-  const next = queue.index + 1;
-  if (next < queue.items.length) return { ...queue, index: next };
-  return { ...queue, index: queue.loop ? 0 : queue.index, active: queue.loop, rounds: (queue.rounds || 0) + 1 };
-}
-module.exports = { defaults, config, duration, safeURL, canonical, normalize, RefreshTimer, parseAnswer, requester, complete, nextQueue };
+module.exports = { defaults, config, duration, normalize, RefreshTimer, parseAnswer, requester, complete };

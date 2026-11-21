@@ -20,15 +20,19 @@ before(async()=>{
   browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_BROWSER_PATH?{executablePath:process.env.PLAYWRIGHT_BROWSER_PATH}:process.platform==='win32'&&fs.existsSync(edge)?{executablePath:edge}:{})});
 });
 after(async()=>{await browser?.close();});
-async function pageFor(t){
+async function pageFor(t, options = {}){
   const context=await browser.newContext({viewport:{width:1100,height:980}});t.after(()=>context.close());
   const page=await context.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));
-  await context.route('**/*',route=>route.request().isNavigationRequest()?route.fulfill({contentType:'text/html',body:fixture}):route.abort());
-  await context.addInitScript(()=>{
+  await context.route('**/*',route=>route.request().isNavigationRequest()?route.fulfill({contentType:'text/html; charset=utf-8',body:options.fixture?.(new URL(route.request().url())) ?? fixture}):route.abort());
+  await context.addInitScript(useSharedStore=>{
     window.__requests=[];window.__delay=0;window.__apiReply='回答 <img src=x onerror=alert(1)>';window.__apiStatus=200;window.__aborts=0;window.__plays=0;
-    const storage=()=>JSON.parse(localStorage.getItem('test-GM')||'{}');
+    const storage=()=>JSON.parse(useSharedStore ? decodeURIComponent(document.cookie.match(/(?:^|; )testgm=([^;]*)/)?.[1] || '%7B%7D') : localStorage.getItem('test-GM')||'{}');
     window.GM_getValue=(key,fallback)=>storage()[key]??fallback;
-    window.GM_setValue=(key,value)=>{const all=storage();all[key]=value;localStorage.setItem('test-GM',JSON.stringify(all));};
+    window.GM_setValue=(key,value)=>{
+      const all=storage();all[key]=value;
+      if (useSharedStore) document.cookie=`testgm=${encodeURIComponent(JSON.stringify(all))}; Domain=chaoxing.com; Path=/; Secure`;
+      else localStorage.setItem('test-GM',JSON.stringify(all));
+    };
     window.GM_xmlhttpRequest=options=>{
       window.__requests.push({url:options.url,data:options.data,headers:options.headers});
       const timer=setTimeout(()=>{
@@ -45,8 +49,8 @@ async function pageFor(t){
     };
     HTMLMediaElement.prototype.play=function(){window.__plays++;Object.defineProperty(this,'paused',{configurable:true,value:false});return Promise.resolve();};
     HTMLMediaElement.prototype.pause=function(){Object.defineProperty(this,'paused',{configurable:true,value:true});};
-  });
-  await page.goto('https://i.chaoxing.com/demo');await page.addScriptTag({content:source});await page.getByRole('navigation').waitFor();
+  }, options.sharedStore || false);
+  await page.goto(options.url || 'https://i.chaoxing.com/demo');await page.addScriptTag({content:source});await page.getByRole('navigation').waitFor();
   t.after(()=>assert.deepEqual(errors,[],'No browser runtime errors'));
   return page;
 }
@@ -117,11 +121,93 @@ test('refresh presets, cross-panel persistence, navigation pause and reload limi
   await page.addScriptTag({content:source});await page.getByRole('navigation').waitFor();await tab(page,'刷新');
   assert.equal(await page.getByRole('button',{name:'开始刷新',exact:true}).isEnabled(),true);assert.match(await page.locator('#refresh-count').textContent(),/1/);
 });
-test('queue validates URLs, persists items, and stop-all prevents automatic playback',async t=>{
-  const page=await pageFor(t);await tab(page,'队列');await page.getByLabel('页面网址').fill('javascript:alert(1)');await page.getByRole('button',{name:'加入网址',exact:true}).click();assert.match(await notice(page).textContent(),/http/);
-  await page.getByRole('button',{name:'加入当前页',exact:true}).click();await page.getByRole('button',{name:'开始队列',exact:true}).click();assert.ok(await page.evaluate(()=>window.__plays)>0);
-  await page.getByRole('button',{name:'停止全部',exact:true}).click();assert.equal(await page.locator('#video').evaluate(v=>v.paused),true);
-  await page.reload();await page.addScriptTag({content:source});await tab(page,'队列');assert.equal(await page.locator('#queue-list .list-item').count(),1);assert.equal(await page.getByRole('button',{name:'开始队列',exact:true}).isEnabled(),true);
+const queueFixture = url => {
+  if (url.pathname === '/demo') return `<!doctype html><title>我的课程</title>
+    <div class="course"><h3>线性代数</h3><a href="/mycourse/studentstudy?courseid=11&clazzid=90">进入课程</a></div>
+    <div class="course" courseid="22" clazzid="91" personid="10"><h3 class="course-name">大学物理</h3><div class="course-info"><p>李老师</p></div></div>
+    <a href="https://example.com/mycourse/studentstudy?courseid=4&clazzid=9">陌生链接</a>`;
+  const completed = url.searchParams.get('courseid') === '11';
+  return `<!doctype html><title>课程</title>
+    <div data-course-chapter data-chapter-status="${completed ? 'complete' : 'pending'}" data-current="true"><button>第 1 章</button></div>
+    <video id="video" style="width:260px;height:150px"></video>`;
+};
+async function readCatalog(page) {
+  await tab(page,'队列');
+  await page.getByRole('button',{name:'读取课程列表',exact:true}).click();
+  await page.locator('.queue-choice').first().waitFor();
+}
+
+test('queue reads cards, filters by teacher and numbers picks in selection order',async t=>{
+  const page=await pageFor(t,{fixture:queueFixture});
+  await readCatalog(page);
+  assert.equal(await page.locator('.queue-choice').count(),2);
+  await page.getByLabel('搜索课程').fill('李老师');
+  assert.equal(await page.locator('.queue-choice').count(),1);
+  await page.getByRole('button',{name:/大学物理/}).click();
+  await page.getByLabel('搜索课程').fill('');
+  await page.getByRole('button',{name:/线性代数/}).click();
+  assert.equal(await page.getByRole('button',{name:/大学物理/}).locator('.queue-index').textContent(),'1');
+  assert.equal(await page.getByRole('button',{name:/线性代数/}).locator('.queue-index').textContent(),'2');
+  await page.locator('#window').screenshot({path:path.join(__dirname,'../test-results/queue.png')});
+  await Promise.all([page.waitForURL(/courseid=22/),page.getByRole('button',{name:'开始学习',exact:true}).click()]);
+  await page.addScriptTag({content:source});
+  await page.getByRole('button',{name:'暂停队列',exact:true}).waitFor();
+  assert.equal(await page.locator('.queue-current').textContent(),'大学物理');
+  await page.getByRole('button',{name:'移出线性代数',exact:true}).click();
+  await page.getByRole('button',{name:'暂停队列',exact:true}).click();
+  await page.reload();
+  await page.addScriptTag({content:source});
+  assert.equal(await page.locator('#queue-list .list-item').count(),1);
+  await page.getByRole('button',{name:'继续队列',exact:true}).click();
+  await page.waitForFunction(()=>window.__plays>0);
+  await page.getByRole('button',{name:'停止全部',exact:true}).click();
+  assert.equal(await page.locator('#video').evaluate(v=>v.paused),true);
+});
+
+test('queue advances on confirmed chapter completion, not on an ended video alone',async t=>{
+  const page=await pageFor(t,{fixture:queueFixture});
+  await readCatalog(page);
+  await page.getByRole('button',{name:/线性代数/}).click();
+  await page.getByRole('button',{name:/大学物理/}).click();
+  await Promise.all([page.waitForURL(/courseid=11/),page.getByRole('button',{name:'开始学习',exact:true}).click()]);
+  await page.addScriptTag({content:source});
+  await page.waitForURL(/courseid=22/, {timeout:8500});
+  await page.addScriptTag({content:source});
+  assert.match(await page.locator('#queue-list .list-item').first().textContent(),/线性代数.*已完成/);
+  await page.locator('#video').evaluate(v=>{Object.defineProperty(v,'ended',{value:true});v.dispatchEvent(new Event('ended'));});
+  await page.waitForTimeout(2750);
+  assert.match(await page.locator('#queue-list .list-item').last().textContent(),/大学物理.*学习中/);
+  await page.getByRole('button',{name:'跳过本门',exact:true}).click();
+  assert.match(await page.locator('#queue-list .list-item').last().textContent(),/已跳过/);
+  assert.match(await page.locator('.queue-current').textContent(),/已结束/);
+});
+
+test('queue clicks the next pending platform chapter when the current one is done',async t=>{
+  const url='https://i.chaoxing.com/mycourse/studentstudy?courseid=11&clazzid=90';
+  const page=await pageFor(t,{url,fixture:()=>`<!doctype html><title>课程</title>
+    <a href="${url}">例题课程</a>
+    <div data-course-chapter data-current="true" data-chapter-status="complete"><button>第 1 章</button></div>
+    <div data-course-chapter data-chapter-status="pending"><button onclick="document.body.dataset.opened='true'">第 2 章</button></div>`});
+  await readCatalog(page);
+  await page.getByRole('button',{name:/例题课程/}).click();
+  await page.getByRole('button',{name:'开始学习',exact:true}).click();
+  await page.waitForFunction(()=>document.body.dataset.opened==='true');
+});
+
+test('queue keeps control when the course opens on another platform subdomain',async t=>{
+  const course='https://mooc1.chaoxing.com/mycourse/studentstudy?courseid=22&clazzid=9';
+  const page=await pageFor(t,{sharedStore:true,fixture:url=>url.pathname==='/demo'
+    ? `<!doctype html><a href="${course}#step=1">跨域课程</a>` : queueFixture(url)});
+  await readCatalog(page);
+  await page.getByRole('button',{name:/跨域课程/}).click();
+  await Promise.all([page.waitForURL(/mooc1\.chaoxing\.com\/mycourse\/studentstudy/),page.getByRole('button',{name:'开始学习',exact:true}).click()]);
+  await page.addScriptTag({content:source});
+  await page.getByRole('button',{name:'暂停队列',exact:true}).waitFor();
+  assert.equal(page.url(),`${course}#step=1`);
+  await page.reload();
+  await page.addScriptTag({content:source});
+  await page.waitForFunction(()=>window.__plays>0);
+  assert.equal(await page.getByRole('button',{name:'暂停队列',exact:true}).isEnabled(),true);
 });
 test('copy unlock preserves default events and is reversible',async t=>{
   const page=await pageFor(t);await tab(page,'设置');await page.getByText('允许页面文字选中、复制和粘贴',{exact:true}).click();await page.getByRole('button',{name:'保存设置',exact:true}).click();

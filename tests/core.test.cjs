@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.cjs');
+const Q = require('../src/course-queue.cjs');
 
 function clock(saved, navigation='navigate') {
   let time=0, stored=saved, fail=false;
@@ -27,9 +28,10 @@ test('invalid and corrupt interval data cannot start a timer',()=>{
 });
 test('duration displays hours and clamps negative numbers',()=>{assert.equal(C.duration(3601),'01:00:01');assert.equal(C.duration(-1),'00:00');assert.equal(C.duration(59.2),'01:00');});
 test('URLs reject script schemes and credentials',()=>{
-  for(const s of ['javascript:alert(1)','data:text/html,foo','https://u:p@example.com'])assert.equal(C.safeURL(s),null);
-  assert.equal(C.safeURL('/page','https://i.chaoxing.com').href,'https://i.chaoxing.com/page');
-  assert.equal(C.canonical('https://a.example/p#fragment'),'https://a.example/p');
+  for(const s of ['javascript:alert(1)','data:text/html,foo','https://u:p@i.chaoxing.com','https://chaoxing.com.example.net'])assert.equal(Q.site(s),null);
+  assert.equal(Q.site('/page','https://i.chaoxing.com').url.href,'https://i.chaoxing.com/page');
+  assert.equal(Q.identify('https://i.chaoxing.com/mycourse/studentstudy?courseId=5&clazzid=2'),'cx:5:2');
+  assert.equal(Q.identify('https://smartcoursestudent.zhihuishu.com/learnPage/5/unit/12'),'zhs:smart:5:12');
 });
 test('settings clamp corrupt values without retaining unknown fields',()=>{
   assert.deepEqual(C.config({apiKey:' key ',model:'bad model',timeout:1,rate:100,unlock:'true',extra:1}),{...C.defaults,apiKey:'key'});
@@ -46,10 +48,28 @@ test('multiple choice deduplicates and fill-in validates answer count',()=>{
   assert.throws(()=>C.parseAnswer('{"answers":["x"]}',{kind:'text',fields:2}));
   assert.deepEqual(C.parseAnswer('{"answers":["x","y"]}',{kind:'text',fields:2}).answers,['x','y']);
 });
-test('queue advances, finishes, or loops without producing invalid indices',()=>{
-  let q={items:[{},{}],index:0,active:true,loop:false,rounds:0};q=C.nextQueue(q);assert.equal(q.index,1);q=C.nextQueue(q);assert.equal(q.active,false);assert.equal(q.rounds,1);
-  q=C.nextQueue({...q,loop:true,active:true});assert.equal(q.index,0);assert.equal(q.active,true);
-  assert.equal(C.nextQueue({...q,items:[]}).active,false);
+test('queue keeps selection order and separates outcomes from the paused state',()=>{
+  const entry = (id, title) => ({ title, url:`https://mooc1.chaoxing.com/mycourse/stu?courseid=${id}&clazzid=20` });
+  const queue=Q.cleanQueue({items:[entry(4,'第二门'),entry(1,'第一门'),entry(4,'重复')]},'chaoxing');
+  assert.equal(queue.items.length,2);
+  assert.equal(Q.begin(queue,'owner',0).title,'第二门');
+  Q.pause(queue);
+  assert.equal(Q.currentCourse(queue).title,'第二门');
+  assert.equal(Q.begin(queue,'owner',50).title,'第二门');
+  Q.resolve(queue,'skipped','已跳过');
+  assert.equal(Q.begin(queue,'owner',60).title,'第一门');
+  Q.resolve(queue,'done','已完成');
+  assert.deepEqual(queue.items.map(item=>item.status),['skipped','done']);
+  assert.equal(queue.status,'finished');
+  assert.equal(Q.begin(queue,'owner',100),null);
+});
+test('navigation handoff preserves the platform fragment and course identity',()=>{
+  const original='https://studyvideoh5.zhihuishu.com/stuStudy?recruitAndCourseId=abc#chapter=1';
+  const restored=Q.readHandoff(Q.handoffURL(original,'token').href);
+  assert.equal(restored.ticket,'token');
+  assert.equal(restored.url.href,original);
+  assert.equal(Q.identify(restored.url.href),'zhs:shared:abc');
+  assert.equal(Q.readHandoff(original),null);
 });
 test('API requests use only the official endpoint and never include credentials in the body',async()=>{
   let captured;const request=C.requester(options=>{captured=options;options.onload({status:200,responseText:'{"data":[]}'});},()=>({apiKey:'test-only-key'}));

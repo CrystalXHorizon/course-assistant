@@ -11,15 +11,8 @@ let logs = read('logs', []); if (!Array.isArray(logs)) logs = [];
 records = records.slice(-100); logs = logs.slice(-150);
 const request = Core.requester(options => GM_xmlhttpRequest(options), () => settings);
 const refresh = new Core.RefreshTimer({ read: () => sessionRead('refresh', null), write: value => sessionWrite('refresh', value), url: location.href, navigation: performance.getEntriesByType('navigation')[0]?.type });
-let queue = sessionRead('queue', { items: [], index: 0, active: false, loop: false, rounds: 0 });
-if (!queue || !Array.isArray(queue.items)) queue = { items: [], index: 0, active: false, loop: false, rounds: 0 };
-queue.items = queue.items.filter(item => typeof item?.title === 'string' && Core.safeURL(item.url)?.origin === location.origin).slice(0,200);
-queue.index = Number.isInteger(queue.index) && queue.index >= 0 && queue.index < queue.items.length ? queue.index : 0;
-queue.active = queue.active === true && Core.canonical(queue.items[queue.index]?.url) === Core.canonical(location.href);
-queue.loop = queue.loop === true;
-queue.rounds = Number.isInteger(queue.rounds) && queue.rounds >= 0 ? queue.rounds : 0;
 let currentTab = 'overview', busyChat = null, busyAnswer = null, busyModels = null, generation = 0, questions = [], chat = [];
-let repeatVideo = false, seenVideos = new Map(), playedVideos = new Set(), navigating = false;
+let repeatVideo = false, seenVideos = new Map();
 let pageURL = location.href, copiedDocuments = PageDOM.copyUnlock(document);
 const host = document.createElement('div'); host.id = 'course-assistant-root';
 host.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:2147483647;';
@@ -58,13 +51,14 @@ function activate(tab) {
   for(const item of root.querySelectorAll('[data-tab]')) item.setAttribute('aria-pressed',String(item.dataset.tab === tab));
   if(tab === 'video') renderVideos();
   if(tab === 'logs') renderLogs();
+  if(tab === 'queue') courseQueue.show();
 }
 function panel(name, children) { return element('section', {class:'panel','data-panel':name,hidden:name !== 'overview'},children); }
 function fold(value) { $('window').hidden=value; $('launcher').hidden=!value; }
-function stopQueue() { queue.active=false; navigating=false; sessionWrite('queue',queue); renderQueue(); }
+function stopQueue() { courseQueue.stop(); }
 function stopAll() {
   busyChat?.abort(); busyAnswer?.abort(); busyModels?.abort(); repeatVideo=false; $('repeat').checked=false;
-  refresh.stop(); stopQueue(); for(const v of videos()) v.pause(); notice('已停止刷新、队列、播放和 AI 请求。'); log('已停止全部运行任务');
+  refresh.stop(); stopQueue(); for(const player of media()) player.pause(); notice('已停止刷新、队列、播放和 AI 请求。'); log('已停止全部运行任务');
 }
 
 root.append(element('style',{text:STYLE}));
@@ -76,7 +70,7 @@ root.append(element('div',{id:'window',class:'window'},[
   ]),
   element('nav',{'aria-label':'功能导航'},tabs.map(([key,label,icon])=>button(label,()=>activate(key),{'data-tab':key,'aria-pressed':String(key==='overview'),class:'nav-button',title:label}))),
   element('main',{id:'main'}),
-  element('footer',{},[element('span',{id:'footer-status',text:'就绪'}),element('span',{text:'v1.0.0 · MIT'})]),
+  element('footer',{},[element('span',{id:'footer-status',text:'就绪'}),element('span',{text:'v' + VERSION + ' · MIT'})]),
   element('div',{id:'notice',role:'status','aria-live':'polite',text:'首次使用请先配置 DeepSeek；其他工具可独立使用。'})
 ]));
 root.append(button('课',()=>fold(false),{id:'launcher',class:'launcher',hidden:true,'aria-label':'展开课程助手'}));
@@ -88,7 +82,7 @@ main.append(panel('overview',[
   hint('课程、题目、AI 与刷新，集中在一个轻量面板里。'),
   element('div',{class:'status-card'},[element('span',{class:'dot'}),element('span',{id:'key-status'})]),
   element('div',{class:'cards'},[
-    ['queue','课程队列','按顺序打开课程页面','☷'],['questions','题目辅助','扫描、分析与核对','✓'],['refresh','定时刷新','间隔、次数与倒计时','↻'],['chat','AI 对话','DeepSeek 官方 API','✦']
+    ['queue','课程队列','从平台课程列表点选','☷'],['questions','题目辅助','扫描、分析与核对','✓'],['refresh','定时刷新','间隔、次数与倒计时','↻'],['chat','AI 对话','DeepSeek 官方 API','✦']
   ].map(([tab,name,desc,icon])=>element('button',{class:'card',onclick:()=>activate(tab)},[element('span',{class:'card-icon',text:icon}),element('strong',{text:name}),element('small',{text:desc})]))),
   element('div',{class:'note'},[element('strong',{text:'从当前页面开始'}),hint('所有任务由你手动启动。先保存未提交的输入，再开启定时刷新。')]),
   row(button('配置 DeepSeek',()=>activate('settings'),{class:'link'}),button('查看记录',()=>activate('logs'),{class:'link'}))
@@ -111,7 +105,7 @@ function updateTimer() {
   $('refresh-count').textContent=`已刷新 ${state.count} 次`;
   $('refresh-start').disabled=state.active;$('refresh-stop').disabled=!state.active;
   for(const el of [$('seconds'),$('limit'),...root.querySelectorAll('[data-preset]')])el.disabled=state.active;
-  $('footer-status').textContent=state.active?`刷新 ${$('countdown').textContent}`:queue.active?'队列运行中':busyChat||busyAnswer?'AI 请求中':'就绪';
+  $('footer-status').textContent=state.active?`刷新 ${$('countdown').textContent}`:courseQueue.active()?'队列运行中':busyChat||busyAnswer?'AI 请求中':'就绪';
 }
 
 // Video controls use only native HTMLMediaElement APIs.
@@ -124,27 +118,25 @@ main.append(panel('video',[
   hint('跨域播放器、非 HTML5 播放器和浏览器自动播放限制可能无法控制。页面恢复后，循环开关默认关闭。')
 ]));
 $('rate').value=String(settings.rate);
-function videos(){return PageDOM.documents(document).flatMap(doc=>[...doc.querySelectorAll('video')]).filter(PageDOM.visible);}
+function media(){return PageDOM.documents(document).flatMap(doc=>[...doc.querySelectorAll('video, audio')]).filter(PageDOM.visible);}
+function videos(){return media().filter(player => player.tagName === 'VIDEO');}
 async function play(video){video.playbackRate=settings.rate;try{await video.play();}catch{throw Error('浏览器阻止播放，请先手动点击课程播放器。');}}
 function trackVideos(){
   const current=videos();
-  for(const [video,handler] of seenVideos)if(!current.includes(video)){video.removeEventListener('ended',handler);seenVideos.delete(video);playedVideos.delete(video);}
-  for(const video of current){
-    if(!seenVideos.has(video)){
-      const ended=()=>{
-        if(repeatVideo){video.currentTime=0;guard(()=>play(video));return;}
-        if(queue.active && playedVideos.has(video)){
-          const all=videos();
-          if(all.length && all.every(v=>v.ended && playedVideos.has(v)))guard(()=>advanceQueue(true));
-        }
-      };
-      video.addEventListener('ended',ended);seenVideos.set(video,ended);
-    }
-    if(queue.active && !playedVideos.has(video)){
-      // An already-finished video is not evidence that this queue run completed it.
-      playedVideos.add(video);if(video.ended)video.currentTime=0;
-      guard(()=>play(video));
-    }
+  for (const [video, handler] of seenVideos) {
+    if (current.includes(video)) continue;
+    video.removeEventListener('ended', handler);
+    seenVideos.delete(video);
+  }
+  for (const video of current) {
+    if (seenVideos.has(video)) continue;
+    const ended = () => {
+      if (!repeatVideo || courseQueue.active()) return;
+      video.currentTime = 0;
+      guard(() => play(video));
+    };
+    video.addEventListener('ended', ended);
+    seenVideos.set(video, ended);
   }
 }
 function renderVideos(){
@@ -155,49 +147,17 @@ function renderVideos(){
   ])):[hint('当前未检测到可控制的视频，请进入课程内容页后重试。')]));
 }
 
-// The queue is deliberately confined to same-origin URLs and one tab.
-main.append(panel('queue',[
-  title('课程队列','添加同一站点的课程链接，在当前标签页依次打开。'),
-  field('课程名称',element('input',{id:'queue-title',placeholder:'可留空，使用当前页面标题'})),
-  field('页面网址',element('input',{id:'queue-url',type:'url',placeholder:'https://…'})),
-  row(button('加入网址',()=>addQueue($('queue-url').value,$('queue-title').value)),button('加入当前页',()=>addQueue(location.href,document.title))),
-  element('label',{class:'check'},[element('input',{id:'queue-loop',type:'checkbox',checked:queue.loop,onchange:event=>{queue.loop=event.target.checked;sessionWrite('queue',queue);}}),'到末尾后循环整个队列']),
-  row(button('开始队列',startQueue,{class:'primary',id:'queue-start'}),button('暂停',()=>{stopQueue();videos().forEach(v=>v.pause());},{id:'queue-stop'}),button('下一项',()=>advanceQueue(false),{id:'queue-next'})),
-  element('div',{id:'queue-list',class:'stack'}),
-  hint('本次运行的所有可见视频自然结束后，可前往下一项。文档、习题或未识别的播放器请手动点击“下一项”。不代表平台已记为完成。')
-]));
-function addQueue(value,titleText){
-  const url=Core.safeURL(value,location.href);
-  if(!url || url.origin!==location.origin)throw Error('请添加当前站点下的 http/https 链接；跨站队列暂不支持。');
-  if(queue.active)throw Error('请先暂停队列再编辑。');
-  if(queue.items.length>=200)throw Error('队列最多保存 200 项。');
-  if(queue.items.some(item=>Core.canonical(item.url)===Core.canonical(url.href)))throw Error('这个页面已在队列中。');
-  queue.items.push({url:url.href,title:String(titleText||document.title||url.pathname).slice(0,160)});
-  sessionWrite('queue',queue);renderQueue();notice('已加入队列。');
-}
-function renderQueue(){
-  $('queue-start').disabled=queue.active||!queue.items.length;$('queue-stop').disabled=!queue.active;$('queue-next').disabled=!queue.items.length;
-  $('queue-list').replaceChildren(...(queue.items.length?queue.items.map((item,index)=>element('div',{class:'list-item'},[
-    element('div',{},[element('strong',{text:`${queue.index===index?'→ ':''}${index+1}. ${item.title}`}),hint(new URL(item.url).pathname)]),
-    button('移除',()=>{if(queue.active)throw Error('请先暂停队列。');queue.items.splice(index,1);queue.index=Math.min(queue.index,Math.max(0,queue.items.length-1));sessionWrite('queue',queue);renderQueue();},{disabled:queue.active,'aria-label':`移除第 ${index+1} 项`})
-  ])):[hint('队列还是空的，先加入一个课程页面。')]));
-}
-function openQueueItem(){
-  sessionWrite('queue',queue);renderQueue();
-  if(!queue.active)return;
-  const target=queue.items[queue.index]?.url;if(!target)return;
-  if(Core.canonical(target)!==Core.canonical(location.href)){navigating=true;location.assign(target);}
-  else{playedVideos.clear();trackVideos();notice('队列已开始。没有视频的页面请手动前往下一项。');}
-}
-function startQueue(){if(!queue.items.length)throw Error('请先加入课程页面。');refresh.stop();repeatVideo=false;$('repeat').checked=false;queue.active=true;openQueueItem();log('开始课程队列');}
-function advanceQueue(automatic){
-  if(navigating || !queue.items.length || (automatic&&!queue.active))return;
-  const prior=queue.index;queue=Core.nextQueue({...queue,active:true});
-  sessionWrite('queue',queue);renderQueue();
-  if(!queue.active){notice('队列已到末尾。');log('队列已到末尾');return;}
-  if(queue.index===prior && queue.items.length===1)for(const video of videos())video.currentTime=0;
-  openQueueItem();
-}
+const courseQueue = createQueuePanel({
+  element, button, hint, field, row, title, notice, log, read, write, sessionRead, sessionWrite,
+  refresh, media, play, safeAction: guard,
+  beforeStart() {
+    repeatVideo = false;
+    $('repeat').checked = false;
+    busyAnswer?.abort();
+  }
+});
+main.append(panel('queue', [courseQueue.view]));
+pageURL = location.href;
 
 // Question analysis is explicit and cancellable. Results are never submitted automatically.
 main.append(panel('questions',[
@@ -335,11 +295,11 @@ $('drag').addEventListener('pointerup',()=>{drag=null;});$('drag').addEventListe
 window.addEventListener('resize',()=>{host.style.left='';host.style.top='';host.style.right='12px';host.style.bottom='12px';});
 window.addEventListener('pageshow',event=>{if(event.persisted)guard(stopAll);});
 window.addEventListener('pagehide',()=>{busyChat?.abort();busyAnswer?.abort();busyModels?.abort();});
-copiedDocuments.set(settings.unlock);updateKeyStatus();updateTimer();renderQueue();renderQuestions();renderLogs();
+copiedDocuments.set(settings.unlock);updateKeyStatus();updateTimer();renderQuestions();renderLogs();
+if (courseQueue.hasRun()) activate('queue');
 setInterval(()=>guard(()=>{
   if(location.href!==pageURL){
     pageURL=location.href;generation++;busyAnswer?.abort();busyChat?.abort();questions=[];renderQuestions();repeatVideo=false;$('repeat').checked=false;
-    if(!navigating)stopQueue();
   }
   if(refresh.tick(location.href)){location.reload();return;}updateTimer();
 }),250);
